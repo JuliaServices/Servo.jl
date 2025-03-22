@@ -1,4 +1,4 @@
-module Example
+module Servo
 export hello, domath
 
 """
