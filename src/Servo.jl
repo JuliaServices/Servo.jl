@@ -77,6 +77,17 @@ macro init(expr)
     end)
 end
 
+function cors_middleware(handler)
+    return function(req::HTTP.Request)
+        res = handler(req)
+        HTTP.setheader(res.headers, "Access-Control-Allow-Origin" => "*")
+        HTTP.setheader(res.headers, "Access-Control-Allow-Headers" => "Origin, X-Requested-With, Content-Type, Accept, Authorization")
+        HTTP.setheader(res.headers, "Access-Control-Allow-Methods" => "GET, POST, PUT, DELETE, OPTIONS")
+        HTTP.setheader(res.headers, "Access-Control-Allow-Credentials" => "true")
+        return res
+    end
+end
+
 function run!(service, profile, port; kw...)
     profile = Servo.init(; profile=profile, kw...)
     # start server
