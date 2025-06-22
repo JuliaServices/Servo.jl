@@ -45,8 +45,8 @@ const CONFIGS = Figgy.Store()
 
 getConfig(key::String, default=nothing) = get(CONFIGS, key, default)
 
-function init(; app="Servo", profile="", configs=Dict(), configdir=nothing, log::Bool=!isinteractive())
-    @info "$app init" CPU_NAME=Sys.CPU_NAME nInteractiveThreads=Threads.threadpoolsize(:interactive) nDefaultThreads=Threads.threadpoolsize(:default)
+function init(; service="Servo", profile="", configs=Dict(), configdir=nothing, log::Bool=!isinteractive())
+    @info "$service init" CPU_NAME=Sys.CPU_NAME nInteractiveThreads=Threads.threadpoolsize(:interactive) nDefaultThreads=Threads.threadpoolsize(:default)
     # load config
     Figgy.load!(CONFIGS, configs, Figgy.ProgramArguments(), Figgy.EnvironmentVariables(), configdir !== nothing ? Figgy.TomlObject(joinpath(configdir, "config.toml")) : Dict(); log)
     # load profile-specific config
@@ -91,7 +91,7 @@ end
 _int(x) = x isa Int ? x : parse(Int, x)
 
 function run!(service, profile, port; kw...)
-    profile = Servo.init(; profile=profile, kw...)
+    profile = Servo.init(; service=service, profile=profile, kw...)
     # start server
     @info "Starting server" service=service profile=profile port=port
     if profile == "local"
