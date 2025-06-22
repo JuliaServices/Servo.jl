@@ -136,29 +136,23 @@ function json_middleware(handler, fargs::Vector{Arg})
     args = []
     return function(req::HTTP.Request)
         argvals = extractargs(fargs, args, req)
-        
-        # Separate positional and keyword arguments
         pos_args = []
         kw_pairs = []
-        
         for (i, arg) in enumerate(fargs)
             if arg.isquery
-                # Query parameters become keyword arguments
                 push!(kw_pairs, (Symbol(arg.name), argvals[i]))
             else
-                # Path parameters and body parameters become positional arguments
                 push!(pos_args, argvals[i])
             end
         end
-        
-        # Call handler with appropriate argument types
-        if !isempty(kw_pairs)
-            kwargs = (; kw_pairs...)
-            ret = handler(pos_args..., kwargs...)
+        kwargs = (; kw_pairs...)
+        ret = if !isempty(pos_args) && !isempty(kw_pairs)
+            handler(pos_args...; kwargs...)
+        elseif !isempty(pos_args)
+            handler(pos_args...)
         else
-            ret = handler(pos_args...)
+            handler(; kwargs...)
         end
-        
         empty!(args)
         return HTTP.Response(200, JSON.json(ret))
     end
