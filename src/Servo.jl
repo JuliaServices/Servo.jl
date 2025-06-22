@@ -38,7 +38,6 @@ function __init__()
         HTTP.register!(PUBLIC_ROUTER, "/**", req -> ROUTER(req))
         HTTP.register!(PUBLIC_ROUTER, "/v1/status", req -> HTTP.Response(200))
         HTTP.register!(PUBLIC_ROUTER, "/v1/version", req -> HTTP.Response(200, VERSION[]))
-        init(; log=false)
     end
 end
 
