@@ -78,7 +78,7 @@ macro init(expr)
 end
 
 function run!(service, profile, port; kw...)
-    profile = Servo.init(profile; kw...)
+    profile = Servo.init(; profile=profile, kw...)
     # start server
     @info "Starting server" service=service profile=profile port=port
     if profile == "local"
