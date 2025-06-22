@@ -88,6 +88,8 @@ function cors_middleware(handler)
     end
 end
 
+_int(x) = x isa Int ? x : parse(Int, x)
+
 function run!(service, profile, port; kw...)
     profile = Servo.init(; profile=profile, kw...)
     # start server
