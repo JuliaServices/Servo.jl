@@ -1,10 +1,8 @@
 const POSTGRES_POOL = ConcurrentUtilities.Pool{Postgres.Connection}()
 const CURRENT_POSTGRES_CONN = ScopedValue{Postgres.Connection}()
 
-function postgres()
-    cryptkey = CONFIGS["cryptkey"]
-    dbcreds = CONFIGS["postgres"]
-    return DBInterface.connect(Postgres.Connection, dbcreds["host"], dbcreds["user"], decrypt(cryptkey, dbcreds["password"]); dbname=dbcreds["dbname"], port=get(dbcreds, "port", 5432))
+function postgres(; host=getConfig("postgres")["host"], user=getConfig("postgres")["user"], password=getConfig("postgres")["password"], dbname=getConfig("postgres")["dbname"])
+    return DBInterface.connect(Postgres.Connection, host, user, password; dbname=dbname, port=5432)
 end
 
 function _isopen(x)

@@ -18,6 +18,7 @@ include("json_middleware.jl")
 include("routing.jl")
 include("uids/UIDs.jl"); using .UIDs
 include("obs.jl"); using .Obs
+include("postgres.jl")
 
 const VERSION = Ref{String}("unknown")
 
