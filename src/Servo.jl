@@ -43,6 +43,8 @@ end
 
 const CONFIGS = Figgy.Store()
 
+getConfig(key::String, default=nothing) = get(CONFIGS, key, default)
+
 function init(; app="Servo", profile="", configs=Dict(), configdir=nothing, log::Bool=!isinteractive())
     @info "$app init" CPU_NAME=Sys.CPU_NAME nInteractiveThreads=Threads.threadpoolsize(:interactive) nDefaultThreads=Threads.threadpoolsize(:default)
     # load config
@@ -51,8 +53,8 @@ function init(; app="Servo", profile="", configs=Dict(), configdir=nothing, log:
     if !isempty(profile)
         Figgy.load!(CONFIGS, Dict("profile" => profile); log)
     end
-    profile = get(CONFIGS, "profile", "local")
-    version = get(CONFIGS, "version", "unknown")
+    profile = getConfig("profile", "local")
+    version = getConfig("version", "unknown")
     if configdir !== nothing
         file = joinpath(configdir, "config-$profile.toml")
         isfile(file) && Figgy.load!(CONFIGS, Figgy.TomlObject(file); log)
