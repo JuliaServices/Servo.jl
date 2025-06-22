@@ -90,7 +90,7 @@ end
 
 _int(x) = x isa Int ? x : parse(Int, x)
 
-function run!(service, profile, port; kw...)
+function run!(service=getConfig("service", "Servo"), profile=getConfig("profile", "local"), port=getConfig("port", 8080); kw...)
     profile = Servo.init(; service=service, profile=profile, kw...)
     # start server
     @info "Starting server" service=service profile=profile port=port
