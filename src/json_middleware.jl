@@ -12,52 +12,55 @@ function parseargs(path, fexpr)
     pathparams = [x.captures[1] for x in eachmatch(r"\{(\w+)\}", path)]
     sig = fexpr.args[1]
     argexprs = @view sig.args[2:end]
-    args = Vector{Expr}(undef, length(argexprs))
-    for i = 1:length(argexprs)
-        argexpr = argexprs[i]
+    
+    # Collect all arguments (including those in :parameters)
+    all_args = Expr[]
+    
+    for argexpr in argexprs
         if argexpr isa Symbol
             # type-less argument as path param or body
             nm = String(argexpr)
             if nm in pathparams
-                args[i] = :(Servo.Arg(true, false, $nm, Any, nothing))
+                push!(all_args, :(Servo.Arg(true, false, $nm, Any, nothing)))
             else
-                args[i] = :(Servo.Arg(false, false, $nm, Any, nothing))
+                push!(all_args, :(Servo.Arg(false, false, $nm, Any, nothing)))
             end
-        elseif argexpr.head == :parameters && argexpr.args[1].head == :kw
-            # keyword argument as query param
-            argex, default = argexpr.args[1].args
-            # remove default value from parent expr since we'll apply it ourselves
-            argexprs[i] = argex
-            if argex isa Symbol
-                nm = String(argex)
-                args[i] = :(Servo.Arg(false, true, $nm, Any, $default))
-            else
-                nm = String(argex.args[1])
-                args[i] = :(Servo.Arg(false, true, $nm, $(argex.args[2]), $default))
+        elseif argexpr.head == :parameters
+            # Handle multiple keyword arguments in :parameters
+            for kw_expr in argexpr.args
+                if kw_expr.head == :kw
+                    argex, default = kw_expr.args
+                    if argex isa Symbol
+                        nm = String(argex)
+                        push!(all_args, :(Servo.Arg(false, true, $nm, Any, $default)))
+                    else
+                        nm = String(argex.args[1])
+                        push!(all_args, :(Servo.Arg(false, true, $nm, $(argex.args[2]), $default)))
+                    end
+                end
             end
         elseif argexpr.head == :kw
-            # keyword argument as query param
+            # single keyword argument as query param
             argex, default = argexpr.args
-            # remove default value from parent expr since we'll apply it ourselves
-            argexprs[i] = argex
             if argex isa Symbol
                 nm = String(argex)
-                args[i] = :(Servo.Arg(false, true, $nm, Any, $default))
+                push!(all_args, :(Servo.Arg(false, true, $nm, Any, $default)))
             else
                 nm = String(argex.args[1])
-                args[i] = :(Servo.Arg(false, true, $nm, $(argex.args[2]), $default))
+                push!(all_args, :(Servo.Arg(false, true, $nm, $(argex.args[2]), $default)))
             end
         else
             # type-annotated argument as path param or body
             nm = String(argexpr.args[1])
             if nm in pathparams
-                args[i] = :(Servo.Arg(true, false, $nm, $(argexpr.args[2]), nothing))
+                push!(all_args, :(Servo.Arg(true, false, $nm, $(argexpr.args[2]), nothing)))
             else
-                args[i] = :(Servo.Arg(false, false, $nm, $(argexpr.args[2]), nothing))
+                push!(all_args, :(Servo.Arg(false, false, $nm, $(argexpr.args[2]), nothing)))
             end
         end
     end
-    return args
+    
+    return all_args
 end
 
 _string(x::Union{AbstractString, AbstractVector{UInt8}}) = String(x)
