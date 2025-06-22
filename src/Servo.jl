@@ -1,6 +1,6 @@
 module Servo
 
-using Logging, Dates, HTTP, JSON, Figgy, DBInterface, Postgres, Tables, ConcurrentUtilities
+using Logging, Dates, HTTP, JSON, Figgy, DBInterface, Postgres, Tables, ConcurrentUtilities, ScopedValues
 
 precompiling() = ccall(:jl_generating_output, Cint, ()) == 1
 
