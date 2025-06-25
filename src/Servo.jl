@@ -19,6 +19,7 @@ include("routing.jl")
 include("uids/UIDs.jl"); using .UIDs
 include("obs.jl"); using .Obs
 include("postgres.jl")
+include("crypt.jl"); using .Crypt
 
 const VERSION = Ref{String}("unknown")
 
