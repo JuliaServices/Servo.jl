@@ -12,6 +12,9 @@ end
 isdone(d::Done) = @atomic(:acquire, d.done)
 done!(d::Done) = @atomic(:release, d.done = true)
 
+const CONFIGS = Figgy.Store()
+getConfig(key::String, default=nothing) = get(CONFIGS, key, default)
+
 include("json_logging.jl")
 include("json_middleware.jl")
 # include("auth_middleware.jl")
@@ -20,6 +23,7 @@ include("uids/UIDs.jl"); using .UIDs
 include("obs.jl"); using .Obs
 include("postgres.jl")
 include("crypt.jl"); using .Crypt
+include("minihmac.jl"); using .MiniHMAC
 
 const VERSION = Ref{String}("unknown")
 
@@ -42,10 +46,6 @@ function __init__()
         HTTP.register!(PUBLIC_ROUTER, "/v1/version", req -> HTTP.Response(200, VERSION[]))
     end
 end
-
-const CONFIGS = Figgy.Store()
-
-getConfig(key::String, default=nothing) = get(CONFIGS, key, default)
 
 function init(; service="Servo", profile="", configs=Dict(), configdir=nothing, log::Bool=!isinteractive())
     @info "$service init" CPU_NAME=Sys.CPU_NAME nInteractiveThreads=Threads.threadpoolsize(:interactive) nDefaultThreads=Threads.threadpoolsize(:default)

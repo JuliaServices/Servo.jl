@@ -1,4 +1,3 @@
-using Test, Example
+using Test, Servo
 
-@test hello("Julia") == "Hello, Julia"
-@test domath(2.0) ≈ 7.0
+include("minihmac.jl")
