@@ -10,7 +10,7 @@ macro GET(router, path, handler)
 end
 
 macro GET(path, handler)
-    esc(:(Servo.@GET(Servo.ROUTER, $path, $handler)))
+    esc(:(Servo.@GET(Servo.ROUTER[], $path, $handler)))
 end
 
 macro POST(router, path, handler)
@@ -23,7 +23,7 @@ macro POST(router, path, handler)
 end
 
 macro POST(path, handler)
-    esc(:(Servo.@POST(Servo.ROUTER, $path, $handler)))
+    esc(:(Servo.@POST(Servo.ROUTER[], $path, $handler)))
 end
 
 macro PUT(router, path, handler)
@@ -36,7 +36,7 @@ macro PUT(router, path, handler)
 end
 
 macro PUT(path, handler)
-    esc(:(Servo.@PUT(Servo.ROUTER, $path, $handler)))
+    esc(:(Servo.@PUT(Servo.ROUTER[], $path, $handler)))
 end
 
 macro DELETE(router, path, handler)
@@ -49,5 +49,5 @@ macro DELETE(router, path, handler)
 end
 
 macro DELETE(path, handler)
-    esc(:(Servo.@DELETE(Servo.ROUTER, $path, $handler)))
+    esc(:(Servo.@DELETE(Servo.ROUTER[], $path, $handler)))
 end
