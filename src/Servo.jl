@@ -17,9 +17,9 @@ const CONFIGS = Figgy.Store()
 function getConfig(key::String, default=nothing)
     parts = split(key, '.')
     length(parts) == 1 && return get(CONFIGS, key, default)
-    conf = get(CONFIGS, parts[1], default)
+    conf = get(CONFIGS, String(parts[1]), default)
     for i in 2:length(parts)
-        conf = get(conf, parts[i])
+        conf = get(conf, String(parts[i]))
     end
     return conf
 end
