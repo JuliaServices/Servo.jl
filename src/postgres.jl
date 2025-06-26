@@ -1,7 +1,7 @@
 const POSTGRES_POOL = ConcurrentUtilities.Pool{Postgres.Connection}()
 const CURRENT_POSTGRES_CONN = ScopedValue{Postgres.Connection}()
 
-function postgres(; host=getConfig("postgres")["host"], user=getConfig("postgres")["user"], password=getConfig("postgres")["password"], dbname=getConfig("postgres")["dbname"])
+function postgres(; host=getConfig("postgres.host"), user=getConfig("postgres.user"), password=decryptConfig("postgres.password"), dbname=getConfig("postgres.dbname"))
     return DBInterface.connect(Postgres.Connection, host, user, password; dbname=dbname, port=5432)
 end
 

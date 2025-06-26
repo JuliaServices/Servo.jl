@@ -13,7 +13,17 @@ isdone(d::Done) = @atomic(:acquire, d.done)
 done!(d::Done) = @atomic(:release, d.done = true)
 
 const CONFIGS = Figgy.Store()
-getConfig(key::String, default=nothing) = get(CONFIGS, key, default)
+# split key on '.' and recursively get
+function getConfig(key::String, default=nothing)
+    parts = split(key, '.')
+    length(parts) == 1 && return get(CONFIGS, key, default)
+    conf = get(CONFIGS, parts[1], default)
+    for i in 2:length(parts)
+        conf = get(conf, parts[i])
+    end
+    return conf
+end
+decryptConfig(key::String) = Crypt.decrypt(getConfig("config_encryption_key"), getConfig(key))
 
 include("json_logging.jl")
 include("json_middleware.jl")
@@ -21,8 +31,8 @@ include("json_middleware.jl")
 include("routing.jl")
 include("uids/UIDs.jl"); using .UIDs
 include("obs.jl"); using .Obs
-include("postgres.jl")
 include("crypt.jl"); using .Crypt
+include("postgres.jl")
 include("minihmac.jl"); using .MiniHMAC
 
 const VERSION = Ref{String}("unknown")
