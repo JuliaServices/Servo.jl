@@ -19,7 +19,7 @@ function getConfig(key::String, default=nothing)
     length(parts) == 1 && return get(CONFIGS, key, default)
     conf = get(CONFIGS, String(parts[1]), default)
     for i in 2:length(parts)
-        conf = get(conf, String(parts[i]))
+        conf = get(conf, String(parts[i]), nothing)
     end
     return conf
 end
