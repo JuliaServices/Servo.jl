@@ -37,17 +37,17 @@ end
 
 # public router routes to ROUTER by default
 const PUBLIC_ROUTER = HTTP.Router(HTTP.Handlers.default404, HTTP.Handlers.default405, version_middleware)
-const ROUTER = HTTP.Router()
+const ROUTER = Ref{HTTP.Router}(HTTP.Router())
 
 function __init__()
     if !precompiling()
-        HTTP.register!(PUBLIC_ROUTER, "/**", req -> ROUTER(req))
+        HTTP.register!(PUBLIC_ROUTER, "/**", ROUTER[])
         HTTP.register!(PUBLIC_ROUTER, "/v1/status", req -> HTTP.Response(200))
         HTTP.register!(PUBLIC_ROUTER, "/v1/version", req -> HTTP.Response(200, VERSION[]))
     end
 end
 
-function init(; service="Servo", profile="", configs=Dict(), configdir=nothing, log::Bool=!isinteractive())
+function init(; service="Servo", profile="", configs=Dict(), configdir=nothing, auth_middleware=nothing, log::Bool=!isinteractive())
     @info "$service init" CPU_NAME=Sys.CPU_NAME nInteractiveThreads=Threads.threadpoolsize(:interactive) nDefaultThreads=Threads.threadpoolsize(:default)
     # load config
     Figgy.load!(CONFIGS, configs, Figgy.ProgramArguments(), Figgy.EnvironmentVariables(), configdir !== nothing ? Figgy.TomlObject(joinpath(configdir, "config.toml")) : Dict(); log)
@@ -64,6 +64,9 @@ function init(; service="Servo", profile="", configs=Dict(), configdir=nothing, 
         isfile(file) && Figgy.load!(CONFIGS, Figgy.TomlObject(file); log)
     end
     @info "Servo config loaded" profile=profile version=version
+    if auth_middleware !== nothing
+        ROUTER[] = HTTP.Router(HTTP.Handlers.default404, HTTP.Handlers.default405, auth_middleware)
+    end
     # initialize auth verifier
     # initialize_auth_verifier!()
     return profile

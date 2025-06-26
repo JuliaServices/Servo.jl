@@ -1,9 +1,9 @@
 module MiniHMAC
 
-using LibAwsCommon, LibAwsCal, Base64
+using LibAwsCommon, LibAwsCal, Base64, Random
 import ..getConfig
 
-export generate_token, verify_token, TokenPayload, is_expired
+export generate_token, verify_token, TokenPayload, is_expired, generateSigningKey
 
 """
     TokenPayload
@@ -248,6 +248,16 @@ end
 function is_expired(token::String)
     payload = verify_token(token)
     return is_expired(payload)
+end
+
+"""
+    Generate a cryptographically secure signing key
+
+    Returns a 32-byte (256-bit) random key suitable for HMAC-SHA256 signing.
+    Uses the most secure random generation available in Julia.
+"""
+function generateSigningKey()
+    return base64url_encode(rand(Random.RandomDevice(),UInt8, 32))
 end
 
 end # module 
