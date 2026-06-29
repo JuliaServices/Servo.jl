@@ -1,6 +1,6 @@
 module Crypt
 
-using LibAwsCommon, LibAwsCal, Random, SHA, Base64, Unicode
+using LibAwsCommon, LibAwsCal, Random, SHA, Base64
 
 export encrypt, decrypt, jasypt_encrypt, jasypt_decrypt
 
@@ -197,7 +197,7 @@ function _aes_cbc_256(key::Vector{UInt8}, iv::Vector{UInt8}, data::Vector{UInt8}
 end
 
 # password -> key-derivation bytes, exactly as Jasypt/SunJCE: UTF-8 of the NFC-normalized password.
-_jasypt_password_bytes(password::AbstractString) = Vector{UInt8}(Unicode.normalize(String(password), :NFC))
+_jasypt_password_bytes(password::AbstractString) = Vector{UInt8}(Base.Unicode.normalize(String(password), :NFC))
 
 """
     jasypt_decrypt(password, enc; iterations=50000) -> String
