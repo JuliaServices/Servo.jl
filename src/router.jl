@@ -59,22 +59,30 @@ matchroute(r::Router, method::AbstractString, path::AbstractString) =
     matchroute(r, Symbol(method), splitsegments(path))
 
 function matchroute(r::Router, method::Symbol, segs::AbstractVector{<:AbstractString})
+    # explicit lock/unlock: a `lock() do` closure would box the scan state below
+    lock(r.lock)
+    try
+        return _matchroute(r.endpoints, method, segs)
+    finally
+        unlock(r.lock)
+    end
+end
+
+function _matchroute(endpoints::Vector{Endpoint}, method::Symbol, segs::AbstractVector{<:AbstractString})
     best = nothing
     bestscore = -1
     pathmatched = false
-    lock(r.lock) do
-        for ep in r.endpoints
-            res = matchsegments(ep.segments, segs)
-            res === nothing && continue
-            if ep.method != method
-                pathmatched = true
-                continue
-            end
-            score, params = res
-            if score > bestscore
-                best = (ep, params)
-                bestscore = score
-            end
+    for ep in endpoints
+        res = matchsegments(ep.segments, segs)
+        res === nothing && continue
+        if ep.method != method
+            pathmatched = true
+            continue
+        end
+        score, params = res
+        if score > bestscore
+            best = (ep, params)
+            bestscore = score
         end
     end
     best !== nothing && return best

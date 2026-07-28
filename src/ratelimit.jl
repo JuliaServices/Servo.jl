@@ -14,18 +14,18 @@ Per-key token-bucket rate limiter: each key accrues `rps` tokens per second up t
 struct RateLimiter
     rps::Float64
     burst::Float64
-    buckets::Dict{Any, TokenBucket}
+    buckets::Dict{Tuple{String, String}, TokenBucket}
     lock::ReentrantLock
 end
 RateLimiter(; rps::Real=5.0, burst::Real=20.0) =
-    RateLimiter(Float64(rps), Float64(burst), Dict{Any, TokenBucket}(), ReentrantLock())
+    RateLimiter(Float64(rps), Float64(burst), Dict{Tuple{String, String}, TokenBucket}(), ReentrantLock())
 
 """
-    Servo.allow!(limiter, key) -> Bool
+    Servo.allow!(limiter, (name, client)) -> Bool
 
-Spend one token from `key`'s bucket if available.
+Spend one token from the bucket for the `(name, client)` string pair if available.
 """
-function allow!(rl::RateLimiter, key)
+function allow!(rl::RateLimiter, key::Tuple{String, String})
     now = time()
     lock(rl.lock) do
         # bound memory: drop buckets idle long enough to be full again
@@ -43,9 +43,10 @@ end
 # set by `run!`; nothing disables public rate limiting (e.g. bare `serve!` in tests)
 const PUBLIC_RATE_LIMITER = Ref{Union{RateLimiter, Nothing}}(nothing)
 
-function checkratelimit!(ep::Endpoint, key)
+function checkratelimit!(ep::Endpoint, client)
     rl = PUBLIC_RATE_LIMITER[]
     rl === nothing && return
-    allow!(rl, (ep.name, key)) || throw(HTTPError(429, "rate limit exceeded"))
+    c = client === nothing ? "" : client isa String ? client : string(client)
+    allow!(rl, (ep.name, c)) || throw(HTTPError(429, "rate limit exceeded"))
     return
 end

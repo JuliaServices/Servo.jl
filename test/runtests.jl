@@ -203,12 +203,12 @@ end
 
 @testset "rate limiting" begin
     rl = Servo.RateLimiter(; rps=10.0, burst=2.0)
-    @test Servo.allow!(rl, "a")
-    @test Servo.allow!(rl, "a")
-    @test !Servo.allow!(rl, "a")
-    @test Servo.allow!(rl, "b")          # separate buckets per key
+    @test Servo.allow!(rl, ("a", "ip1"))
+    @test Servo.allow!(rl, ("a", "ip1"))
+    @test !Servo.allow!(rl, ("a", "ip1"))
+    @test Servo.allow!(rl, ("b", "ip1"))  # separate buckets per key
     sleep(0.15)
-    @test Servo.allow!(rl, "a")          # refilled
+    @test Servo.allow!(rl, ("a", "ip1"))  # refilled
 
     # public endpoints enforce the limiter installed by run!
     r = Servo.Router()
@@ -381,3 +381,5 @@ end
 end
 
 end # @testset "Servo"
+
+include("trim_compile_tests.jl")

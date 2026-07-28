@@ -50,9 +50,10 @@ Response(status::Integer, body::Union{AbstractString, AbstractVector{UInt8}}=UIn
     Servo.handle(endpoint, pathparams, request) -> Servo.Response
 
 The generic request pipeline, shared by all transports: authenticate (or
-rate-limit a public endpoint), bind the request to the target function's
-arguments, invoke it, and package the result. Throws `HTTPError` for all
-request-level failures; transports translate that into their wire format.
+rate-limit a public endpoint), invoke the endpoint's binder (which extracts and
+coerces the target function's arguments and calls it), and package the result.
+Throws `HTTPError` for all request-level failures; transports translate that into
+their wire format.
 """
 function handle(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}, req)
     if ep.auth isa Public
@@ -62,10 +63,7 @@ function handle(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}
         pr = authenticate(ep.auth, req)
         pr === nothing && throw(HTTPError(401, "unauthorized"))
     end
-    return @with PRINCIPAL => pr REQUEST => req begin
-        args, kwargs = bind(ep, pathparams, req)
-        toresponse(ep, ep.target(args...; kwargs...))
-    end
+    return withcontext(() -> toresponse(ep, ep.binder(ep.format, pathparams, req)), pr, req)
 end
 
 toresponse(::Endpoint, r::Response) = r
@@ -73,45 +71,79 @@ toresponse(::Endpoint, ::Nothing) = Response(204)
 toresponse(ep::Endpoint, result) =
     Response(200, serialize(ep.format, result); headers=["Content-Type" => mime(ep.format)])
 
-"""
-    Servo.bind(endpoint, pathparams, request) -> (args, kwargs)
+# ── statically-typed binding helpers ────────────────────────────────────────
+# The endpoint macros generate a binder function whose body calls these with the
+# parameter types as literal `Type` arguments, so every call is statically
+# dispatched (juliac/trim friendly) and the binding order follows the function
+# signature (later keyword defaults may reference earlier arguments, as in a
+# normal Julia call).
 
-Extract and coerce the target function's arguments from a transport request:
-path parameters (from the router match) and the request body in positional order,
-query parameters as keyword arguments. Absent optional query parameters are
-simply not passed, so the function's own defaults apply.
+function querydict(req)
+    q = Dict{String, String}()
+    for (k, v) in rawquery(req)
+        haskey(q, k) || (q[String(k)] = String(v))
+    end
+    return q
+end
+
+hasquery(q::Dict{String, String}, name::String) = haskey(q, name)
+
+function pathvalue(::Type{T}, pathparams::AbstractDict{Symbol, <:AbstractString}, name::Symbol) where {T}
+    return coerceparam(T, pathparams[name], name)
+end
+
+function queryvalue(::Type{T}, q::Dict{String, String}, name::Symbol) where {T}
+    raw = get(q, String(name), nothing)
+    raw === nothing && throw(HTTPError(400, "missing required query parameter `$name`"))
+    return coerceparam(T, raw, name)
+end
+
+function bodyvalue(fmt::Format, ::Type{T}, req, name::Symbol) where {T}
+    body = rawbody(req)
+    (body === nothing || isempty(body)) &&
+        throw(HTTPError(400, "request body required for `$name`"))
+    try
+        return deserialize(fmt, T, body)
+    catch e
+        e isa HTTPError && rethrow()
+        throw(HTTPError(400, "malformed request body for `$name`"))
+    end
+end
+
+# ── the reflective fallback binder ──────────────────────────────────────────
+
+function (b::GenericBinder)(fmt::Format, pathparams, req)
+    args, kwargs = bind(b.params, fmt, pathparams, req)
+    return b.target(args...; kwargs...)
+end
+
 """
-function bind(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}, req)
+    Servo.bind(params, format, pathparams, request) -> (args, kwargs)
+
+Reflectively extract and coerce a target function's arguments from a transport
+request: path parameters (from the router match) and the request body in
+positional order, query parameters as keyword arguments. Absent optional query
+parameters are simply not passed, so the function's own defaults apply. This is
+the [`GenericBinder`](@ref) implementation; macro-registered endpoints use a
+generated statically-typed binder instead.
+"""
+function bind(params::Vector{Param}, fmt::Format, pathparams::AbstractDict{Symbol, <:AbstractString}, req)
     args = Any[]
     kwargs = Pair{Symbol, Any}[]
     query = nothing
-    for p in ep.params
+    for p in params
         if p.source == :path
-            push!(args, coerceparam(p, pathparams[p.name]))
+            push!(args, coerceparam(p.type, pathparams[p.name], p.name))
         elseif p.source == :query
-            if query === nothing
-                query = Dict{String, String}()
-                for (k, v) in rawquery(req)
-                    haskey(query, k) || (query[String(k)] = String(v))
-                end
-            end
+            query === nothing && (query = querydict(req))
             raw = get(query, String(p.name), nothing)
             if raw !== nothing
-                push!(kwargs, p.name => coerceparam(p, raw))
+                push!(kwargs, p.name => coerceparam(p.type, raw, p.name))
             elseif p.required
                 throw(HTTPError(400, "missing required query parameter `$(p.name)`"))
             end
         else # :body
-            body = rawbody(req)
-            (body === nothing || isempty(body)) &&
-                throw(HTTPError(400, "request body required for `$(p.name)`"))
-            val = try
-                deserialize(ep.format, p.type, body)
-            catch e
-                e isa HTTPError && rethrow()
-                throw(HTTPError(400, "malformed request body for `$(p.name)`: $(sprint(showerror, e))"))
-            end
-            push!(args, val)
+            push!(args, bodyvalue(fmt, p.type, req, p.name))
         end
     end
     return args, kwargs
@@ -119,12 +151,12 @@ end
 
 # ── string -> typed value coercion for path/query parameters ────────────────
 
-function coerceparam(p::Param, raw::AbstractString)
+function coerceparam(::Type{T}, raw::AbstractString, name::Symbol) where {T}
     try
-        return coerce(p.type, raw)
+        return coerce(T, raw)
     catch e
         e isa HTTPError && rethrow()
-        throw(HTTPError(400, "invalid value \"$raw\" for parameter `$(p.name)`: expected $(p.type)"))
+        throw(HTTPError(400, "invalid value \"$raw\" for parameter `$name`: expected $T"))
     end
 end
 

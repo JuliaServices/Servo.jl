@@ -20,8 +20,13 @@ the lessons of three bottoms-up implementations (Servo 1.x, Roam, league-easy).
 4. **Small core, open seams.** The core defines interfaces in terms of plain
    Julia; concrete serialization (JSON) plugs in through a package extension, and
    transports plug in through a three-function accessor interface.
-5. **Minimal dependencies.** Servo depends on `Figgy` (config) and `HTTP` (the
-   flagship transport) only. `JSON` is a weak dependency.
+5. **Minimal dependencies.** Servo's only real dependency is `Figgy` (config).
+   Both `HTTP` (the flagship transport, extension `ServoHTTPExt`) and `JSON`
+   (the default format, extension `ServoJSONExt`) are weak dependencies — an app
+   does `using Servo, HTTP, JSON`.
+6. **Trim-compilable core.** juliac `--trim=safe` must be able to verify the
+   core request path (league-easy's deployment constraint). This is enforced by
+   a JuliaC trim workload in the test suite and shaped several choices below.
 
 ## The layer model
 
@@ -53,17 +58,25 @@ authenticate (or rate-limit if Public)
 ## Core model
 
 ```julia
-struct Endpoint{F, A <: AuthScheme, S <: Format}
+struct Endpoint{B, A <: AuthScheme, S <: Format}
     name::String                            # e.g. "simulate" (the function name)
     method::Symbol                          # :GET, :POST, :PUT, :DELETE, :PATCH
     path::String                            # "/v1/users/{id}"
     segments::Vector{Union{String, Symbol}} # parsed pattern; Symbols are captures
     params::Vector{Param}                   # name, type, source, required
-    target::F                               # the domain function
+    target::Any                             # the domain function (introspection)
+    binder::B                               # (format, pathparams, req) -> result
     auth::A                                 # mandatory
     format::S                               # payload (de)serialization
 end
 ```
+
+Requests are invoked through the `binder`. The endpoint macros *generate* a
+binder from the function signature with every parameter type as a literal `Type`
+argument, so extraction, coercion, deserialization, and the final call all
+dispatch statically — this is what makes the request path trim-verifiable (and
+fast). Hand-constructed endpoints fall back to a reflective `GenericBinder` that
+interprets `params` dynamically at request time.
 
 `Param.source` is one of `:path`, `:query`, `:body`. The binding convention
 (derived from the function signature by the `@GET`/`@POST`/… macros):
@@ -168,8 +181,11 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
 `Endpoint` constructor enforces the same for non-macro registration.
 
 - The *principal* is whatever `authenticate` returns — a user id, JWT claims, a
-  rich context struct. Handlers read it with `Servo.principal()` (a
-  `ScopedValue`, like `Servo.request()`).
+  rich context struct. Handlers read it with `Servo.principal()` (and the raw
+  request with `Servo.request()`) — ambient per-request state keyed by the
+  current task. (Deliberately not `Base.ScopedValues`: its HAMT scope storage is
+  keyed by an abstract type juliac trim cannot verify. Tradeoff: the context
+  does not propagate into tasks spawned inside a handler.)
 - `Public` endpoints skip authentication but get the default **rate limiter**
   installed by `run!`: a token bucket keyed by (endpoint, client IP), configured
   via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20).
@@ -182,7 +198,7 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
 
 ```julia
 module Soleil
-using Servo, JSON, Solar
+using Servo, HTTP, JSON, Solar
 
 Servo.@init begin
     Servo.@POST "/v1/simulate" public function simulate(spec::Solar.SimulationConfig; year::Int=2026)
@@ -242,12 +258,30 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
 - **Positional-with-default args** treated as query params (ambiguous with
   optional positional) → rejected at expansion; query params are keyword-only.
 
+## Trim compilation
+
+`test/trim_compile_tests.jl` compiles `test/servo_trim_safe.jl` with JuliaC
+(`--trim=safe`, zero-error/zero-warning budget, same harness as
+Figgy/JSON/StructUtils) and runs the resulting binary. The workload exercises
+endpoint declaration + validation, routing, statically-bound coercion, auth,
+rate limiting, TextFormat + JSON serialization, and Figgy config loading over a
+mock transport. Scope notes:
+
+- The **HTTP transport is excluded**: released HTTP 1.x can't live in a
+  trim=safe image (MbedTLS/OpenSSL `__init__` cfunctions) — which is exactly why
+  it's a package extension. When the Reseau-based HTTP 2.x lands, a server
+  workload can be added.
+- **JSON body materialization is excluded**: typed `JSON.parse` is a known open
+  trim gap in JSON.jl itself (see JSON's own trim entrypoints test); `JSON.json`
+  writing is covered. Servo's body-binding path is verified via `TextFormat`.
+- Trim-shaped code choices: generated static binders, `target::Any` (uncalled
+  `Function`-typed args de-specialize and force dynamic `apply_type`), explicit
+  lock/unlock instead of closure-capturing `lock() do` in `matchroute`,
+  task-keyed request context instead of ScopedValues, typed rate-limiter keys,
+  and one-concrete-source-per-call Figgy loading.
+
 ## Deliberately deferred
 
 Resource lifecycle hooks (DB pools etc.), background/scheduled task registry,
 metrics/observability, streaming responses (SSE), config schemas/validation,
-concrete auth schemes and authorization, request-id propagation. Also worth
-noting for later: league-easy's `juliac --trim` constraint — the core keeps
-dispatch simple (concrete `Endpoint` type parameters, function barriers at
-`handle`), but trim-friendliness needs a dedicated pass when an app actually
-needs it.
+concrete auth schemes and authorization, request-id propagation.

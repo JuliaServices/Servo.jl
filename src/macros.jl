@@ -6,7 +6,9 @@ struct ParamSpec
     type::Any      # type *expression*, evaluated in the caller's module
     source::Symbol
     required::Bool
+    default::Any   # default *expression* for optional query params
 end
+ParamSpec(name, type, source, required) = ParamSpec(name, type, source, required, nothing)
 
 function parsesignature(funcdef, placeholders::Vector{Symbol})
     sig = nothing
@@ -60,7 +62,7 @@ function keywordspec(a)
         name = argname(a.args[1])
         name === nothing && throw(ArgumentError(
             "unsupported endpoint keyword argument `$(a.args[1])`"))
-        return ParamSpec(name, argtype(a.args[1]), :query, false)
+        return ParamSpec(name, argtype(a.args[1]), :query, false, a.args[2])
     end
     name = argname(a)
     name === nothing && throw(ArgumentError(
@@ -114,10 +116,44 @@ function endpointexpr(method::Symbol, args...)
             path = $path,
             target = $(esc(fname)),
             params = Servo.Param[$(paramexprs...)],
+            binder = $(binderexpr(fname, specs)),
             auth = $authex,
             format = $formatex,
         ))
     end
+end
+
+# Generate the statically-typed binder for an endpoint function: parameter types
+# appear as literal `Type` arguments so every extraction/coercion call — and the
+# final invocation of the target — dispatches statically (juliac/trim friendly).
+# Arguments bind to locals named like the function's own arguments, in signature
+# order, so later keyword defaults may reference earlier arguments as usual.
+function binderexpr(fname::Symbol, specs::Vector{ParamSpec})
+    stmts = Any[]
+    if any(s -> s.source == :query, specs)
+        push!(stmts, :(q = Servo.querydict(req)))
+    end
+    for s in specs
+        val = if s.source == :path
+            :(Servo.pathvalue($(esc(s.type)), pathparams, $(QuoteNode(s.name))))
+        elseif s.source == :body
+            :(Servo.bodyvalue(fmt, $(esc(s.type)), req, $(QuoteNode(s.name))))
+        elseif s.required
+            :(Servo.queryvalue($(esc(s.type)), q, $(QuoteNode(s.name))))
+        else
+            :(Servo.hasquery(q, $(String(s.name))) ?
+                Servo.queryvalue($(esc(s.type)), q, $(QuoteNode(s.name))) : $(esc(s.default)))
+        end
+        push!(stmts, :($(esc(s.name)) = $val))
+    end
+    posargs = [esc(s.name) for s in specs if s.source in (:path, :body)]
+    kwargs = [Expr(:kw, s.name, esc(s.name)) for s in specs if s.source == :query]
+    call = isempty(kwargs) ? Expr(:call, esc(fname), posargs...) :
+        Expr(:call, esc(fname), Expr(:parameters, kwargs...), posargs...)
+    return :(function (fmt, pathparams, req)
+        $(stmts...)
+        return $call
+    end)
 end
 
 """

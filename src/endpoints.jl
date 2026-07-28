@@ -39,20 +39,40 @@ All structural validation happens here, at construction time (i.e. when your app
 loads): unknown methods, malformed paths, path/argument mismatches, misplaced body
 arguments, missing auth, and unavailable formats all throw `ArgumentError`
 immediately.
+
+The `binder` is the callable that actually extracts/coerces arguments and invokes
+`target`: `binder(format, pathparams, request) -> result`. The endpoint macros
+generate a statically-typed binder from the function signature (making the whole
+request path type-stable and juliac/trim friendly); endpoints constructed by hand
+default to the reflective [`GenericBinder`](@ref).
 """
-struct Endpoint{F, A <: AuthScheme, S <: Format}
+struct Endpoint{B, A <: AuthScheme, S <: Format}
     name::String
     method::Symbol
     path::String
     segments::Vector{Union{String, Symbol}}
     params::Vector{Param}
-    target::F
+    target::Any   # introspection only; requests are invoked through `binder`
+    binder::B
     auth::A
     format::S
 end
 
+"""
+    GenericBinder(target, params)
+
+The default endpoint binder: interprets `params` at request time, collecting
+positional arguments into a `Vector{Any}` and keywords into pairs, then splats
+into `target`. Fully general (any `Vector{Param}`), but dynamically dispatched —
+the endpoint macros generate a static binder instead.
+"""
+struct GenericBinder
+    target::Any
+    params::Vector{Param}
+end
+
 function Endpoint(; method::Symbol, path::AbstractString, target,
-                    params::Vector{Param}=Param[], auth=nothing,
+                    params::Vector{Param}=Param[], auth=nothing, binder=nothing,
                     name::AbstractString="", format::Format=JSONFormat())
     auth === nothing && throw(ArgumentError(
         "endpoint `$method $path` does not declare an auth scheme: pass `auth=Servo.Public()` " *
@@ -65,7 +85,8 @@ function Endpoint(; method::Symbol, path::AbstractString, target,
     segments = parsepattern(path)
     validateparams(method, path, segments, params)
     nm = isempty(name) ? "$method $path" : String(name)
-    return Endpoint(nm, method, String(path), segments, params, target, auth, format)
+    b = binder === nothing ? GenericBinder(target, params) : binder
+    return Endpoint(nm, method, String(path), segments, params, target, b, auth, format)
 end
 
 # "/users/{id}/orders" -> ["users", :id, "orders"]

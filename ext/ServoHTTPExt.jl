@@ -1,53 +1,52 @@
-# HTTP transport: implements the transport interface for HTTP.Request and owns
-# the server lifecycle + HTTP-level middleware (error envelope, CORS, access log).
+# HTTP transport for Servo: implements the transport accessor interface for
+# HTTP.Request and owns the server lifecycle + HTTP-level middleware (error
+# envelope, CORS, access log). Loads automatically when both Servo and HTTP are.
+module ServoHTTPExt
 
-rawbody(req::HTTP.Request) = req.body
-rawquery(req::HTTP.Request) = HTTP.URIs.queryparampairs(HTTP.URI(req.target))
+using Servo, HTTP
 
-function clientip(req::HTTP.Request)
+Servo.rawbody(req::HTTP.Request) = req.body
+Servo.rawquery(req::HTTP.Request) = HTTP.URIs.queryparampairs(HTTP.URI(req.target))
+
+function Servo.clientip(req::HTTP.Request)
     # trust X-Forwarded-For when present (set by the load balancer in real deploys)
     xff = HTTP.header(req, "X-Forwarded-For", "")
     isempty(xff) || return String(strip(first(split(xff, ','))))
     return get(req.context, :peerip, nothing)
 end
 
-"""
-    Servo.httphandler(router) -> f(::HTTP.Request)::HTTP.Response
-
-The HTTP request handler for a router: match, `Servo.handle`, and translate
-results/errors into HTTP responses. Errors are serialized into a stable
-`(; error = (; message, code))` envelope with the endpoint's format (plain text
-when no endpoint was matched).
-"""
-function httphandler(router::Router)
+# match, `Servo.handle`, and translate results/errors into HTTP responses;
+# errors serialize into the stable `(; error = (; message, code))` envelope with
+# the endpoint's format (plain text when no endpoint was matched)
+function httphandler(router::Servo.Router)
     return function(req::HTTP.Request)
         ep = nothing
         try
             target = HTTP.URI(req.target)
-            segments = [HTTP.URIs.unescapeuri(s) for s in splitsegments(target.path)]
-            m = matchroute(router, Symbol(req.method), segments)
-            m === nothing && throw(HTTPError(404, "no route for $(req.method) $(target.path)"))
+            segments = [HTTP.URIs.unescapeuri(s) for s in Servo.splitsegments(target.path)]
+            m = Servo.matchroute(router, Symbol(req.method), segments)
+            m === nothing && throw(Servo.HTTPError(404, "no route for $(req.method) $(target.path)"))
             m === :method_not_allowed &&
-                throw(HTTPError(405, "$(req.method) not allowed for $(target.path)"))
+                throw(Servo.HTTPError(405, "$(req.method) not allowed for $(target.path)"))
             ep, pathparams = m
-            resp = handle(ep, pathparams, req)
+            resp = Servo.handle(ep, pathparams, req)
             return HTTP.Response(resp.status, resp.headers, resp.body)
         catch e
-            e isa HTTPError && return errorresponse(ep, e.status, e.message)
+            e isa Servo.HTTPError && return errorresponse(ep, e.status, e.message)
             @error "unhandled exception in endpoint $(ep === nothing ? "<unmatched>" : ep.name)" exception=(e, catch_backtrace())
             return errorresponse(ep, 500, "internal server error")
         end
     end
 end
 
-function errorresponse(ep::Union{Endpoint, Nothing}, status::Int, message::String)
+function errorresponse(ep::Union{Servo.Endpoint, Nothing}, status::Int, message::String)
     if ep !== nothing
         body = try
-            serialize(ep.format, (; error = (; message, code = status)))
+            Servo.serialize(ep.format, (; error = (; message, code = status)))
         catch
             message
         end
-        return HTTP.Response(status, ["Content-Type" => mime(ep.format)], body)
+        return HTTP.Response(status, ["Content-Type" => Servo.mime(ep.format)], body)
     end
     return HTTP.Response(status, ["Content-Type" => "text/plain; charset=utf-8"], message)
 end
@@ -79,26 +78,19 @@ function accesslog_middleware(handler)
     end
 end
 
-"""
-    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080, cors=false, accesslog=false, kw...)
-
-Start (non-blocking) an HTTP server for a router and return the server handle
-(`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
-loads config and applies profile conventions; `serve!` is the bare transport
-entrypoint. Remaining `kw` pass through to `HTTP.serve!`.
-"""
-function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                cors::Bool=false, accesslog::Bool=false, kw...)
+function Servo.serve!(router::Servo.Router=Servo.ROUTER; host="0.0.0.0", port::Integer=8080,
+                      cors::Bool=false, accesslog::Bool=false, kw...)
     handler = httphandler(router)
     cors && (handler = cors_middleware(handler))
     accesslog && (handler = accesslog_middleware(handler))
     streamhandler = HTTP.streamhandler(handler)
     return HTTP.serve!(host, port; stream=true, kw...) do stream
-        peer = try Sockets.getpeername(stream) catch; nothing end
+        peer = try Servo.Sockets.getpeername(stream) catch; nothing end
         peer === nothing || (stream.message.context[:peerip] = peer[1])
         streamhandler(stream)
     end
 end
 
-"""the local port a server (returned by `serve!`/`run!`) is bound to"""
-port(server::HTTP.Server) = Int(Sockets.getsockname(server.listener.server)[2])
+Servo.port(server::HTTP.Server) = Int(Servo.Sockets.getsockname(server.listener.server)[2])
+
+end # module
