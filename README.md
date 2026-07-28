@@ -1,8 +1,40 @@
-Example Julia package repo.
+# Servo.jl
 
-[![](https://img.shields.io/badge/docs-stable-blue.svg)](https://JuliaLang.github.io/Example.jl/stable)
-[![](https://img.shields.io/badge/docs-dev-blue.svg)](https://JuliaLang.github.io/Example.jl/dev)
+*An application driver for Julia: turn a package of useful functions into a
+running service.*
 
-GitHub Actions : [![Build Status](https://github.com/JuliaLang/Example.jl/workflows/CI/badge.svg)](https://github.com/JuliaLang/Example.jl/actions?query=workflow%3ACI+branch%3Amaster)
+```julia
+module MyApp
+using Servo, JSON
 
-[![codecov.io](http://codecov.io/github/JuliaLang/Example.jl/coverage.svg?branch=master)](http://codecov.io/github/JuliaLang/Example.jl?branch=master)
+struct Order
+    item::String
+    qty::Int
+end
+
+Servo.@init begin
+    # every endpoint declares its auth explicitly — `public` or an AuthScheme
+    Servo.@GET "/v1/orders/{id}" public function getorder(id::Int; expand::Bool=false)
+        return (; id, expand)                    # serialized as JSON
+    end
+
+    Servo.@POST "/v1/orders" public function neworder(order::Order)
+        return Servo.Response(201, JSON.json((; created = order.item)))
+    end
+end
+
+run(profile=""; kw...) = Servo.run("MyApp", profile; kw...)
+
+end
+```
+
+```julia
+julia> MyApp.run()   # loads config for the profile, serves HTTP, CORS when local
+```
+
+Path segments bind positional arguments, the request body binds the trailing
+positional argument, query parameters bind keyword arguments — all coerced to
+the declared types, with 400s (not stringly-typed surprises) on bad input.
+
+See [DESIGN.md](DESIGN.md) for the full design: the `Format` and transport
+seams, the auth contract, config layering, and what's deliberately deferred.
