@@ -108,18 +108,23 @@ function endpointexpr(method::Symbol, args...)
     fname, specs = parsesignature(funcdef, placeholders)
     paramexprs = [:(Servo.Param($(QuoteNode(s.name)), $(esc(s.type)), $(QuoteNode(s.source)), $(s.required)))
                   for s in specs]
+    # `target` is a single-assignment `let` binding: closures capturing it stay
+    # unboxed (capturing the named function binding directly would box it, since
+    # method definitions are potentially-repeated assignments)
     return quote
         $(esc(funcdef))
-        Servo.register!($(esc(router)), Servo.Endpoint(
-            name = $(String(fname)),
-            method = $(QuoteNode(method)),
-            path = $path,
-            target = $(esc(fname)),
-            params = Servo.Param[$(paramexprs...)],
-            binder = $(binderexpr(fname, specs)),
-            auth = $authex,
-            format = $formatex,
-        ))
+        Servo.register!($(esc(router)), let target = $(esc(fname))
+            Servo.Endpoint(
+                name = $(String(fname)),
+                method = $(QuoteNode(method)),
+                path = $path,
+                target = target,
+                params = Servo.Param[$(paramexprs...)],
+                binder = Servo.Binder($(binderexpr(specs))),
+                auth = $authex,
+                format = $formatex,
+            )
+        end)
     end
 end
 
@@ -128,29 +133,26 @@ end
 # final invocation of the target — dispatches statically (juliac/trim friendly).
 # Arguments bind to locals named like the function's own arguments, in signature
 # order, so later keyword defaults may reference earlier arguments as usual.
-function binderexpr(fname::Symbol, specs::Vector{ParamSpec})
+function binderexpr(specs::Vector{ParamSpec})
     stmts = Any[]
-    if any(s -> s.source == :query, specs)
-        push!(stmts, :(q = Servo.querydict(req)))
-    end
     for s in specs
         val = if s.source == :path
             :(Servo.pathvalue($(esc(s.type)), pathparams, $(QuoteNode(s.name))))
         elseif s.source == :body
-            :(Servo.bodyvalue(fmt, $(esc(s.type)), req, $(QuoteNode(s.name))))
+            :(Servo.bodyvalue(fmt, $(esc(s.type)), body, $(QuoteNode(s.name))))
         elseif s.required
-            :(Servo.queryvalue($(esc(s.type)), q, $(QuoteNode(s.name))))
+            :(Servo.queryvalue($(esc(s.type)), query, $(QuoteNode(s.name))))
         else
-            :(Servo.hasquery(q, $(String(s.name))) ?
-                Servo.queryvalue($(esc(s.type)), q, $(QuoteNode(s.name))) : $(esc(s.default)))
+            :(Servo.hasquery(query, $(String(s.name))) ?
+                Servo.queryvalue($(esc(s.type)), query, $(QuoteNode(s.name))) : $(esc(s.default)))
         end
         push!(stmts, :($(esc(s.name)) = $val))
     end
     posargs = [esc(s.name) for s in specs if s.source in (:path, :body)]
     kwargs = [Expr(:kw, s.name, esc(s.name)) for s in specs if s.source == :query]
-    call = isempty(kwargs) ? Expr(:call, esc(fname), posargs...) :
-        Expr(:call, esc(fname), Expr(:parameters, kwargs...), posargs...)
-    return :(function (fmt, pathparams, req)
+    call = isempty(kwargs) ? Expr(:call, :target, posargs...) :
+        Expr(:call, :target, Expr(:parameters, kwargs...), posargs...)
+    return :(function (fmt, pathparams, query, body)
         $(stmts...)
         return $call
     end)
@@ -189,7 +191,7 @@ macro GET(args...)
     endpointexpr(:GET, args...)
 end
 
-for M in (:POST, :PUT, :DELETE, :PATCH)
+for M in (:POST, :PUT, :DELETE, :PATCH, :QUERY)
     @eval macro $M(args...)
         endpointexpr($(QuoteNode(M)), args...)
     end

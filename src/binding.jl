@@ -49,48 +49,73 @@ Response(status::Integer, body::Union{AbstractString, AbstractVector{UInt8}}=UIn
 """
     Servo.handle(endpoint, pathparams, request) -> Servo.Response
 
-The generic request pipeline, shared by all transports: authenticate (or
-rate-limit a public endpoint), invoke the endpoint's binder (which extracts and
-coerces the target function's arguments and calls it), and package the result.
-Throws `HTTPError` for all request-level failures; transports translate that into
-their wire format.
+The generic request pipeline entrypoint, shared by all transports. Extracts the
+query pairs, body bytes, and client address from the (concretely typed) transport
+request, then invokes the endpoint's type-erased handler, which authenticates
+(or rate-limits a public endpoint), binds the target function's arguments, and
+packages the result. Throws `HTTPError` for all request-level failures;
+transports translate that into their wire format.
 """
 function handle(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}, req)
-    if ep.auth isa Public
-        checkratelimit!(ep, clientip(req))
+    pp = pathparams isa Dict{Symbol, String} ? pathparams :
+        Dict{Symbol, String}(k => String(v) for (k, v) in pathparams)
+    query = Dict{String, String}()
+    for (k, v) in rawquery(req)
+        haskey(query, k) || (query[String(k)] = String(v))
+    end
+    raw = rawbody(req)
+    body = raw === nothing ? UInt8[] :
+        raw isa Vector{UInt8} ? raw :
+        raw isa AbstractVector{UInt8} ? Vector{UInt8}(raw) :
+        Vector{UInt8}(codeunits(String(raw)))
+    ip = clientip(req)
+    ipstr = ip === nothing ? "" : ip isa String ? ip : string(ip)
+    return ep.handler(pp, query, body, ipstr, req)
+end
+
+"""
+The per-endpoint request pipeline, wrapped in a [`HandlerFn`](@ref) at endpoint
+construction: auth (or public rate limiting), ambient request context, argument
+binding via the endpoint's binder, and result packaging — all statically
+compiled against the endpoint's concrete binder/auth/format types.
+"""
+struct RequestHandler{B, A <: AuthScheme, S <: Format} <: Function
+    name::String
+    binder::B
+    auth::A
+    format::S
+end
+
+function (h::RequestHandler)(call::HandlerCall)
+    if h.auth isa Public
+        checkratelimit!(h.name, call.clientip)
         pr = nothing
     else
-        pr = authenticate(ep.auth, req)
+        pr = authenticate(h.auth, call.req)
         pr === nothing && throw(HTTPError(401, "unauthorized"))
     end
-    return withcontext(() -> toresponse(ep, ep.binder(ep.format, pathparams, req)), pr, req)
+    return @with PRINCIPAL => pr REQUEST => call.req begin
+        toresponse(h.format, h.binder(h.format, call.pathparams, call.query, call.body))
+    end
 end
 
-toresponse(::Endpoint, r::Response) = r
-toresponse(::Endpoint, ::Nothing) = Response(204)
-toresponse(ep::Endpoint, result) =
-    Response(200, serialize(ep.format, result); headers=["Content-Type" => mime(ep.format)])
+toresponse(::Format, r::Response) = r
+toresponse(::Format, ::Nothing) = Response(204)
+toresponse(fmt::Format, result) =
+    Response(200, serialize(fmt, result); headers=["Content-Type" => mime(fmt)])
 
 # ── statically-typed binding helpers ────────────────────────────────────────
-# The endpoint macros generate a binder function whose body calls these with the
-# parameter types as literal `Type` arguments, so every call is statically
-# dispatched (juliac/trim friendly) and the binding order follows the function
-# signature (later keyword defaults may reference earlier arguments, as in a
-# normal Julia call).
-
-function querydict(req)
-    q = Dict{String, String}()
-    for (k, v) in rawquery(req)
-        haskey(q, k) || (q[String(k)] = String(v))
-    end
-    return q
-end
+# The endpoint macros generate a binder `(format, pathparams, query, body) ->
+# result` whose body calls these with the parameter types as literal `Type`
+# arguments, so every call is statically dispatched (juliac/trim friendly) and
+# the binding order follows the function signature (later keyword defaults may
+# reference earlier arguments, as in a normal Julia call).
 
 hasquery(q::Dict{String, String}, name::String) = haskey(q, name)
 
 # return annotations keep binders fully inferable (so e.g. response types can be
-# derived from a binder's return type) even when the request type is abstract
-function pathvalue(::Type{T}, pathparams::AbstractDict{Symbol, <:AbstractString}, name::Symbol)::T where {T}
+# derived from a binder's return type)
+function pathvalue(::Type{T}, pathparams::Dict{Symbol, String}, name::Symbol)::T where {T}
     return coerceparam(T, pathparams[name], name)
 end
 
@@ -100,10 +125,8 @@ function queryvalue(::Type{T}, q::Dict{String, String}, name::Symbol)::T where {
     return coerceparam(T, raw, name)
 end
 
-function bodyvalue(fmt::Format, ::Type{T}, req, name::Symbol)::T where {T}
-    body = rawbody(req)
-    (body === nothing || isempty(body)) &&
-        throw(HTTPError(400, "request body required for `$name`"))
+function bodyvalue(fmt::Format, ::Type{T}, body::Vector{UInt8}, name::Symbol)::T where {T}
+    isempty(body) && throw(HTTPError(400, "request body required for `$name`"))
     try
         return deserialize(fmt, T, body)
     catch e
@@ -114,30 +137,29 @@ end
 
 # ── the reflective fallback binder ──────────────────────────────────────────
 
-function (b::GenericBinder)(fmt::Format, pathparams, req)
-    args, kwargs = bind(b.params, fmt, pathparams, req)
+function (b::GenericBinder)(fmt::Format, pathparams, query, body)
+    args, kwargs = bind(b.params, fmt, pathparams, query, body)
     return b.target(args...; kwargs...)
 end
 
 """
-    Servo.bind(params, format, pathparams, request) -> (args, kwargs)
+    Servo.bind(params, format, pathparams, query, body) -> (args, kwargs)
 
-Reflectively extract and coerce a target function's arguments from a transport
-request: path parameters (from the router match) and the request body in
-positional order, query parameters as keyword arguments. Absent optional query
-parameters are simply not passed, so the function's own defaults apply. This is
-the [`GenericBinder`](@ref) implementation; macro-registered endpoints use a
+Reflectively extract and coerce a target function's arguments: path parameters
+(from the router match) and the request body in positional order, query
+parameters as keyword arguments. Absent optional query parameters are simply not
+passed, so the function's own defaults apply. This is the
+[`GenericBinder`](@ref) implementation; macro-registered endpoints use a
 generated statically-typed binder instead.
 """
-function bind(params::Vector{Param}, fmt::Format, pathparams::AbstractDict{Symbol, <:AbstractString}, req)
+function bind(params::Vector{Param}, fmt::Format, pathparams::Dict{Symbol, String},
+              query::Dict{String, String}, body::Vector{UInt8})
     args = Any[]
     kwargs = Pair{Symbol, Any}[]
-    query = nothing
     for p in params
         if p.source == :path
             push!(args, coerceparam(p.type, pathparams[p.name], p.name))
         elseif p.source == :query
-            query === nothing && (query = querydict(req))
             raw = get(query, String(p.name), nothing)
             if raw !== nothing
                 push!(kwargs, p.name => coerceparam(p.type, raw, p.name))
@@ -145,7 +167,7 @@ function bind(params::Vector{Param}, fmt::Format, pathparams::AbstractDict{Symbo
                 throw(HTTPError(400, "missing required query parameter `$(p.name)`"))
             end
         else # :body
-            push!(args, bodyvalue(fmt, p.type, req, p.name))
+            push!(args, bodyvalue(fmt, p.type, body, p.name))
         end
     end
     return args, kwargs

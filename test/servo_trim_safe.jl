@@ -1,10 +1,20 @@
 # JuliaC --trim=safe workload for Servo's core machinery: endpoint declaration
-# (macros + validation), routing, statically-bound argument extraction/coercion,
-# auth, public rate limiting, formats (TextFormat + the JSON extension), and
-# Figgy-backed config loading — exercised over a minimal non-HTTP transport. The
-# HTTP transport itself lives in the ServoHTTPExt extension and is deliberately
-# not part of this workload: released HTTP 1.x (MbedTLS/OpenSSL init) is not
-# trim-verifiable.
+# (macros + validation), routing, the type-erased handler path (HandlerFn),
+# statically-bound argument extraction/coercion, auth, public rate limiting,
+# formats (TextFormat + the JSON extension), and Figgy-backed config loading —
+# exercised over a minimal non-HTTP transport.
+#
+# The app is built at *runtime* (from main), the required pattern for endpoints:
+# their type-erased handlers capture function pointers that would go stale if
+# baked into a compile-time image. Requests are dispatched through endpoints
+# returned by `matchroute` — the erased handler path needs no concretely-typed
+# endpoint references.
+#
+# Known upstream trim limitations (allowlisted by the harness, see
+# trim_compile_tests.jl): Base.ScopedValues scope storage is not yet
+# trim-verifiable, and HTTP 1.x's TLS init requires Julia >= 1.13. Typed
+# `JSON.parse` materialization is likewise a known JSON.jl gap, so the JSON
+# format is exercised on the write side (TextFormat covers body binding).
 using Servo, JSON
 
 struct TrimRequest
@@ -27,41 +37,6 @@ Servo.authenticate(a::TrimAuth, req::TrimRequest) =
 struct TrimWidget
     id::Int
     tags::Vector{String}
-end
-
-# endpoints are declared at top level (the normal app-module pattern), so the
-# handler functions are const globals and the endpoint values are fully concrete
-const ROUTER = Servo.Router()
-
-const EP_ITEM = Servo.@GET ROUTER "/items/{id}" public format=Servo.TextFormat() function getitem(
-        id::Int; verbose::Bool=false, tags::Vector{String}=String[],
-        limit::Union{Nothing, Int}=nothing, owner::String)
-    "id=$id verbose=$verbose tags=$(join(tags, '|')) limit=$limit owner=$owner"
-end
-
-const EP_DEL = Servo.@DELETE ROUTER "/items/{id}" public format=Servo.TextFormat() function rmitem(id::Int)
-    nothing
-end
-
-const EP_ECHO = Servo.@POST ROUTER "/echo" public format=Servo.TextFormat() function echo(msg::String)
-    Servo.Response(201, uppercase(msg))
-end
-
-# JSON response serialization; note the trim workload deliberately has no
-# JSONFormat *body* argument — typed `JSON.parse` materialization is a known
-# open trim gap in JSON.jl itself (see JSON's own trim entrypoints test), while
-# `JSON.json` writing is trim-clean. Servo's body-binding code path is still
-# verified via the TextFormat endpoints above.
-const EP_WIDGET = Servo.@GET ROUTER "/widgets/{id}" public function getwidget(id::Int; dry::Bool=false)
-    (; ok = !dry, id, n = 2)
-end
-
-const EP_SECRET = Servo.@GET ROUTER "/secret" TrimAuth("open-sesame") format=Servo.TextFormat() function secret()
-    Servo.principal() isa String ? "granted" : "no-principal"
-end
-
-const EP_PUB = Servo.@GET ROUTER "/pub" public format=Servo.TextFormat() function pub()
-    "ok"
 end
 
 const NOPARAMS = Dict{Symbol, String}()
@@ -92,64 +67,107 @@ function _expect_argumenterror(f, msg::AbstractString)::Nothing
     return nothing
 end
 
-function _trim_routing()::Nothing
-    m = Servo.matchroute(ROUTER, "GET", "/items/42")
-    _trim_assert(m isa Tuple, "matchroute should match")
-    if m isa Tuple
-        pathparams = m[2]::Dict{Symbol, String}
-        _trim_assert(pathparams[:id] == "42", "path param captured")
+function _buildapp()
+    r = Servo.Router()
+    Servo.@GET r "/items/{id}" public format=Servo.TextFormat() function getitem(
+            id::Int; verbose::Bool=false, tags::Vector{String}=String[],
+            limit::Union{Nothing, Int}=nothing, owner::String)
+        "id=$id verbose=$verbose tags=$(join(tags, '|')) limit=$limit owner=$owner"
     end
-    _trim_assert(Servo.matchroute(ROUTER, "PUT", "/items/42") === :method_not_allowed, "405")
-    _trim_assert(Servo.matchroute(ROUTER, "GET", "/nope") === nothing, "404")
-    _trim_assert(length(ROUTER.endpoints) == 6, "route table size")
+    Servo.@DELETE r "/items/{id}" public format=Servo.TextFormat() function rmitem(id::Int)
+        nothing
+    end
+    Servo.@POST r "/echo" public format=Servo.TextFormat() function echo(msg::String)
+        Servo.Response(201, uppercase(msg))
+    end
+    Servo.@QUERY r "/search" public format=Servo.TextFormat() function search(needle::String; limit::Int=3)
+        "found:$needle:$limit"
+    end
+    Servo.@GET r "/widgets/{id}" public function getwidget(id::Int; dry::Bool=false)
+        (; ok = !dry, id, n = 2)
+    end
+    Servo.@GET r "/secret" TrimAuth("open-sesame") format=Servo.TextFormat() function secret()
+        Servo.principal() isa String ? "granted" : "no-principal"
+    end
+    Servo.@GET r "/pub" public format=Servo.TextFormat() function pub()
+        "ok"
+    end
+    return r
+end
+
+# requests dispatch through matchroute results: Endpoint is a concrete struct,
+# so this needs no per-endpoint typed references
+function _getep(r::Servo.Router, method::String, path::String)
+    m = Servo.matchroute(r, method, path)
+    m isa Tuple || error("no route for $method $path")
+    return m[1], m[2]
+end
+
+function _trim_routing(r::Servo.Router)::Nothing
+    ep, pp = _getep(r, "GET", "/items/42")
+    _trim_assert(ep.name == "getitem", "route name")
+    _trim_assert(pp[:id] == "42", "path param captured")
+    _trim_assert(Servo.matchroute(r, "PUT", "/items/42") === :method_not_allowed, "405")
+    _trim_assert(Servo.matchroute(r, "GET", "/nope") === nothing, "404")
+    _trim_assert(length(r.endpoints) == 7, "route table size")
     return nothing
 end
 
-function _trim_binding()::Nothing
-    resp = Servo.handle(EP_ITEM, Dict(:id => "7"),
+function _trim_binding(r::Servo.Router)::Nothing
+    ep, _ = _getep(r, "GET", "/items/7")
+    resp = Servo.handle(ep, Dict(:id => "7"),
         TrimRequest(; query = ["owner" => "jake", "verbose" => "true", "tags" => "a,b", "limit" => "3"]))
     _trim_assert(resp.status == 200, "getitem status")
     _trim_assert(resp.body == "id=7 verbose=true tags=a|b limit=3 owner=jake", "getitem body")
-    resp = Servo.handle(EP_ITEM, Dict(:id => "7"), TrimRequest(; query = ["owner" => "jake"]))
+    resp = Servo.handle(ep, Dict(:id => "7"), TrimRequest(; query = ["owner" => "jake"]))
     _trim_assert(resp.body == "id=7 verbose=false tags= limit=nothing owner=jake", "getitem defaults")
 
     _expect_httperror(400, "missing required query param") do
-        Servo.handle(EP_ITEM, Dict(:id => "7"), TrimRequest())
+        Servo.handle(ep, Dict(:id => "7"), TrimRequest())
     end
     _expect_httperror(400, "bad path param") do
-        Servo.handle(EP_ITEM, Dict(:id => "abc"), TrimRequest(; query = ["owner" => "j"]))
+        Servo.handle(ep, Dict(:id => "abc"), TrimRequest(; query = ["owner" => "j"]))
     end
     _expect_httperror(400, "bad query param") do
-        Servo.handle(EP_ITEM, Dict(:id => "7"), TrimRequest(; query = ["owner" => "j", "limit" => "many"]))
+        Servo.handle(ep, Dict(:id => "7"), TrimRequest(; query = ["owner" => "j", "limit" => "many"]))
     end
 
     # nothing -> 204; Servo.Response passthrough; empty body -> 400
-    _trim_assert(Servo.handle(EP_DEL, Dict(:id => "1"), TrimRequest()).status == 204, "204")
-    resp = Servo.handle(EP_ECHO, NOPARAMS, TrimRequest(; body = "hey"))
+    epdel, _ = _getep(r, "DELETE", "/items/1")
+    _trim_assert(Servo.handle(epdel, Dict(:id => "1"), TrimRequest()).status == 204, "204")
+    epecho, _ = _getep(r, "POST", "/echo")
+    resp = Servo.handle(epecho, NOPARAMS, TrimRequest(; body = "hey"))
     _trim_assert(resp.status == 201 && resp.body == "HEY", "response passthrough")
     _expect_httperror(400, "missing body") do
-        Servo.handle(EP_ECHO, NOPARAMS, TrimRequest())
+        Servo.handle(epecho, NOPARAMS, TrimRequest())
     end
+
+    # the QUERY method binds a body plus query parameters
+    epq, _ = _getep(r, "QUERY", "/search")
+    resp = Servo.handle(epq, NOPARAMS, TrimRequest(; body = "needle", query = ["limit" => "5"]))
+    _trim_assert(resp.body == "found:needle:5", "QUERY binding")
     return nothing
 end
 
-function _trim_json()::Nothing
+function _trim_json(r::Servo.Router)::Nothing
     _trim_assert(JSON.json(TrimWidget(1, ["x"])) == "{\"id\":1,\"tags\":[\"x\"]}", "json struct write")
-    resp = Servo.handle(EP_WIDGET, Dict(:id => "9"), TrimRequest())
+    ep, _ = _getep(r, "GET", "/widgets/9")
+    resp = Servo.handle(ep, Dict(:id => "9"), TrimRequest())
     _trim_assert(resp.status == 200, "json status")
     _trim_assert(resp.headers == ["Content-Type" => "application/json; charset=utf-8"], "json content type")
     _trim_assert(resp.body == "{\"ok\":true,\"id\":9,\"n\":2}", "json response")
-    resp = Servo.handle(EP_WIDGET, Dict(:id => "9"), TrimRequest(; query = ["dry" => "true"]))
+    resp = Servo.handle(ep, Dict(:id => "9"), TrimRequest(; query = ["dry" => "true"]))
     _trim_assert(resp.body == "{\"ok\":false,\"id\":9,\"n\":2}", "json response with query")
     return nothing
 end
 
-function _trim_auth_and_ratelimit()::Nothing
-    resp = Servo.handle(EP_SECRET, NOPARAMS, TrimRequest(; query = ["key" => "open-sesame"]))
+function _trim_auth_and_ratelimit(r::Servo.Router)::Nothing
+    ep, _ = _getep(r, "GET", "/secret")
+    resp = Servo.handle(ep, NOPARAMS, TrimRequest(; query = ["key" => "open-sesame"]))
     _trim_assert(resp.body == "granted", "auth principal")
     _trim_assert(Servo.principal() === nothing, "principal cleared outside request")
     _expect_httperror(401, "bad credentials") do
-        Servo.handle(EP_SECRET, NOPARAMS, TrimRequest(; query = ["key" => "wrong"]))
+        Servo.handle(ep, NOPARAMS, TrimRequest(; query = ["key" => "wrong"]))
     end
 
     rl = Servo.RateLimiter(; rps = 10.0, burst = 2.0)
@@ -158,11 +176,12 @@ function _trim_auth_and_ratelimit()::Nothing
     _trim_assert(!Servo.allow!(rl, ("a", "1.2.3.4")), "bucket exhausted")
     _trim_assert(Servo.allow!(rl, ("a", "5.6.7.8")), "separate key")
 
+    pub, _ = _getep(r, "GET", "/pub")
     Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps = 0.1, burst = 1.0)
     try
-        _trim_assert(Servo.handle(EP_PUB, NOPARAMS, TrimRequest(; ip = "1.2.3.4")).status == 200, "public ok")
+        _trim_assert(Servo.handle(pub, NOPARAMS, TrimRequest(; ip = "1.2.3.4")).status == 200, "public ok")
         _expect_httperror(429, "public rate limited") do
-            Servo.handle(EP_PUB, NOPARAMS, TrimRequest(; ip = "1.2.3.4"))
+            Servo.handle(pub, NOPARAMS, TrimRequest(; ip = "1.2.3.4"))
         end
     finally
         Servo.PUBLIC_RATE_LIMITER[] = nothing
@@ -171,17 +190,21 @@ function _trim_auth_and_ratelimit()::Nothing
 end
 
 function _trim_validation()::Nothing
+    # explicit stub binders: hand-constructed endpoints default to the
+    # reflective GenericBinder, which is deliberately not trim-verifiable
+    stub = Servo.Binder((fmt, pp, q, b) -> nothing)
     _expect_argumenterror("missing auth") do
-        Servo.Endpoint(; method = :GET, path = "/x", target = () -> 1, format = Servo.TextFormat())
+        Servo.Endpoint(; method = :GET, path = "/x", target = () -> 1,
+            binder = stub, format = Servo.TextFormat())
     end
     _expect_argumenterror("body arg on GET") do
         Servo.Endpoint(; method = :GET, path = "/x", target = () -> 1,
-            params = [Servo.Param(:b, String, :body)],
+            params = [Servo.Param(:b, String, :body)], binder = stub,
             auth = Servo.Public(), format = Servo.TextFormat())
     end
     _expect_argumenterror("path/arg mismatch") do
         Servo.Endpoint(; method = :GET, path = "/a/{id}", target = () -> 1,
-            auth = Servo.Public(), format = Servo.TextFormat())
+            binder = stub, auth = Servo.Public(), format = Servo.TextFormat())
     end
     return nothing
 end
@@ -216,10 +239,11 @@ function _trim_config()::Nothing
 end
 
 function run_servo_trim_sample()::Nothing
-    _trim_routing()
-    _trim_binding()
-    _trim_json()
-    _trim_auth_and_ratelimit()
+    r = _buildapp()
+    _trim_routing(r)
+    _trim_binding(r)
+    _trim_json(r)
+    _trim_auth_and_ratelimit(r)
     _trim_validation()
     _trim_config()
     return nothing

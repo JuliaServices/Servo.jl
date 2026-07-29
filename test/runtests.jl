@@ -177,6 +177,15 @@ end
     resp = Servo.handle(ep, NOPARAMS, TestRequest(; body="x"))
     @test resp.status == 201 && ("Location" => "/created/1") in resp.headers
 
+    # the QUERY method carries a body (its trailing positional arg) plus query params
+    ep = Servo.@QUERY r "/search" public format=Servo.TextFormat() function searchit(needle::String; limit::Int=2)
+        "$needle/$limit"
+    end
+    @test ep.method == :QUERY
+    @test [p.source for p in ep.params] == [:body, :query]
+    resp = Servo.handle(ep, NOPARAMS, TestRequest(; body="abc", query=["limit" => "5"]))
+    @test resp.status == 200 && String(resp.body) == "abc/5"
+
     # handler HTTPError helpers surface as-is
     ep = Servo.@GET r "/teapot" public format=Servo.TextFormat() function teapot()
         throw(Servo.HTTPError(418, "short and stout"))
@@ -262,6 +271,9 @@ end
     Servo.@GET r "/boom" public function boom()
         error("kaboom")
     end
+    Servo.@QUERY r "/find" public function findwidget(w::Widget)
+        (; found = w.id, n = length(w.tags))
+    end
 
     server = Servo.serve!(r; host="127.0.0.1", port=0)
     try
@@ -301,6 +313,11 @@ end
         @test resp.status == 500
         @test JSON.parse(String(resp.body)).error.message == "internal server error"
         @test !occursin("kaboom", String(resp.body))
+
+        # the QUERY method over real HTTP, with a JSON body
+        resp = HTTP.request("QUERY", base * "/find"; body=JSON.json(Widget(3, ["q"])), status_exception=false)
+        @test resp.status == 200
+        @test JSON.parse(String(resp.body)).found == 3
     finally
         close(server)
     end

@@ -33,47 +33,12 @@ default per-client rate limiting when the app is started via `Servo.run!`.
 """
 struct Public <: AuthScheme end
 
-# Ambient per-request state, keyed by task. (Deliberately not Base.ScopedValues:
-# its HAMT scope storage is keyed by an abstract ScopedValue type, which juliac
-# --trim=safe cannot verify. The tradeoff: this context does not propagate to
-# tasks spawned inside a handler.)
-struct RequestContext
-    principal::Any
-    request::Any
-end
-
-const CONTEXTS = Dict{Task, RequestContext}()
-const CONTEXTS_LOCK = ReentrantLock()
-
-function withcontext(f, principal, request)
-    t = current_task()
-    lock(CONTEXTS_LOCK)
-    try
-        CONTEXTS[t] = RequestContext(principal, request)
-    finally
-        unlock(CONTEXTS_LOCK)
-    end
-    try
-        return f()
-    finally
-        lock(CONTEXTS_LOCK)
-        try
-            delete!(CONTEXTS, t)
-        finally
-            unlock(CONTEXTS_LOCK)
-        end
-    end
-end
-
-function context()
-    t = current_task()
-    lock(CONTEXTS_LOCK)
-    try
-        return get(CONTEXTS, t, nothing)
-    finally
-        unlock(CONTEXTS_LOCK)
-    end
-end
+# Ambient per-request state: ScopedValues, so the context propagates into tasks
+# spawned inside a handler. (Note: Base's ScopedValues scope storage is not yet
+# juliac --trim=safe verifiable — a known upstream limitation the trim test
+# harness allowlists until a Julia release fixes it.)
+const PRINCIPAL = ScopedValue{Any}(nothing)
+const REQUEST = ScopedValue{Any}(nothing)
 
 """
     Servo.principal()
@@ -81,10 +46,7 @@ end
 The principal returned by the current endpoint's `authenticate`, or `nothing` on
 public endpoints. Only meaningful inside a handler call.
 """
-function principal()
-    c = context()
-    return c === nothing ? nothing : c.principal
-end
+principal() = PRINCIPAL[]
 
 """
     Servo.request()
@@ -92,7 +54,4 @@ end
 The raw transport request currently being handled (e.g. an `HTTP.Request`), or
 `nothing` outside a handler call.
 """
-function request()
-    c = context()
-    return c === nothing ? nothing : c.request
-end
+request() = REQUEST[]

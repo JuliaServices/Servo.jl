@@ -21,8 +21,8 @@ struct Param
     end
 end
 
-const METHODS = (:GET, :POST, :PUT, :DELETE, :PATCH)
-const BODYLESS_METHODS = (:GET, :DELETE)
+const METHODS = (:GET, :POST, :PUT, :DELETE, :PATCH, :QUERY)
+const BODYLESS_METHODS = (:GET, :DELETE)  # QUERY carries a request body by design
 
 """
     Servo.Endpoint(; method, path, target, params=Param[], auth, name="", format=JSONFormat())
@@ -41,21 +41,31 @@ arguments, missing auth, and unavailable formats all throw `ArgumentError`
 immediately.
 
 The `binder` is the callable that actually extracts/coerces arguments and invokes
-`target`: `binder(format, pathparams, request) -> result`. The endpoint macros
-generate a statically-typed binder from the function signature (making the whole
-request path type-stable and juliac/trim friendly); endpoints constructed by hand
-default to the reflective [`GenericBinder`](@ref).
+`target`: `binder(format, pathparams, query, body) -> result`. The endpoint
+macros generate a statically-typed binder from the function signature; endpoints
+constructed by hand default to the reflective [`GenericBinder`](@ref).
+
+Requests are served through `handler`, a type-erased [`HandlerFn`](@ref) built
+at construction that closes over the endpoint's concrete binder/auth/format.
+This makes `Endpoint` itself concrete (no type parameters — a `Vector{Endpoint}`
+route table is fully typed, and dispatching a router match involves no dynamic
+call), while the pipeline inside each handler stays statically compiled against
+that endpoint's types. One consequence: **endpoints must be constructed at
+runtime** (registration belongs in `Servo.@init` / your module's `__init__`),
+since the handler captures a function pointer that would go stale if baked into
+a precompile image.
 """
-struct Endpoint{B, A <: AuthScheme, S <: Format}
+struct Endpoint
     name::String
     method::Symbol
     path::String
     segments::Vector{Union{String, Symbol}}
     params::Vector{Param}
-    target::Any   # introspection only; requests are invoked through `binder`
-    binder::B
-    auth::A
-    format::S
+    target::Any   # introspection only; requests are invoked through `handler`
+    binder::Any   # introspection/inference only; wrapped inside `handler`
+    auth::AuthScheme
+    format::Format
+    handler::HandlerFn
 end
 
 """
@@ -71,6 +81,20 @@ struct GenericBinder
     params::Vector{Param}
 end
 
+"""
+    Binder(f)
+
+Wrapper for a binder callable `f(format, pathparams, query, body) -> result`.
+Deliberately not a `Function` subtype: bare closures passed through keyword
+arguments get de-specialized by Julia's `::Function` heuristic, which would make
+the endpoint's handler construction dynamically dispatched (and juliac/trim
+unverifiable); wrapping preserves the concrete type end to end.
+"""
+struct Binder{F}
+    f::F
+end
+(b::Binder)(fmt, pathparams, query, body) = b.f(fmt, pathparams, query, body)
+
 function Endpoint(; method::Symbol, path::AbstractString, target,
                     params::Vector{Param}=Param[], auth=nothing, binder=nothing,
                     name::AbstractString="", format::Format=JSONFormat())
@@ -85,8 +109,10 @@ function Endpoint(; method::Symbol, path::AbstractString, target,
     segments = parsepattern(path)
     validateparams(method, path, segments, params)
     nm = isempty(name) ? "$method $path" : String(name)
-    b = binder === nothing ? GenericBinder(target, params) : binder
-    return Endpoint(nm, method, String(path), segments, params, target, b, auth, format)
+    b = binder === nothing ? GenericBinder(target, params) :
+        (binder isa Binder || binder isa GenericBinder) ? binder : Binder(binder)
+    handler = HandlerFn(RequestHandler(nm, b, auth, format))
+    return Endpoint(nm, method, String(path), segments, params, target, b, auth, format, handler)
 end
 
 # "/users/{id}/orders" -> ["users", :id, "orders"]

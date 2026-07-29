@@ -43,10 +43,9 @@ end
 # set by `run!`; nothing disables public rate limiting (e.g. bare `serve!` in tests)
 const PUBLIC_RATE_LIMITER = Ref{Union{RateLimiter, Nothing}}(nothing)
 
-function checkratelimit!(ep::Endpoint, client)
+function checkratelimit!(name::String, client::String)
     rl = PUBLIC_RATE_LIMITER[]
     rl === nothing && return
-    c = client === nothing ? "" : client isa String ? client : string(client)
-    allow!(rl, (ep.name, c)) || throw(HTTPError(429, "rate limit exceeded"))
+    allow!(rl, (name, client)) || throw(HTTPError(429, "rate limit exceeded"))
     return
 end

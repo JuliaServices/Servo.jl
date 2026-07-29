@@ -5,7 +5,7 @@ running service.*
 
 ```julia
 module MyApp
-using Servo, HTTP, JSON
+using Servo, JSON
 
 struct Order
     item::String

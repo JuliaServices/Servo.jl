@@ -42,7 +42,6 @@ function run!(name::AbstractString="Servo", profile::AbstractString="";
               router::Router=ROUTER, host="0.0.0.0", port::Union{Integer, Nothing}=nothing,
               configdir::Union{AbstractString, Nothing}=nothing, configs=Dict{String, Any}(),
               accesslog::Bool=true, log::Bool=!isinteractive())
-    checkhttp()
     @info "$name init" julia=Base.VERSION threads=Threads.nthreads()
     prof = loadconfig!(; profile, configdir, configs, log)
     p = _int(something(port, config("port", 8080)))
