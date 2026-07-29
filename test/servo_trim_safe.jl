@@ -92,6 +92,14 @@ function _buildapp()
     Servo.@GET r "/pub" public format=Servo.TextFormat() function pub()
         "ok"
     end
+    Servo.@GET r "/docs/{page...}" public format=Servo.TextFormat() function docpage(page::String)
+        "doc:$page"
+    end
+    # typing the request argument is what keeps the raw-handler call statically
+    # resolvable under trim (untyped handlers work, at the cost of one dynamic call)
+    Servo.register!(r, :GET, "/mirror/{id}/**", function mirror(req::TrimRequest)
+        Servo.Response(200, "mirror:" * Servo.pathparams()[:id])
+    end; auth=Servo.Public())
     return r
 end
 
@@ -109,7 +117,19 @@ function _trim_routing(r::Servo.Router)::Nothing
     _trim_assert(pp[:id] == "42", "path param captured")
     _trim_assert(Servo.matchroute(r, "PUT", "/items/42") === :method_not_allowed, "405")
     _trim_assert(Servo.matchroute(r, "GET", "/nope") === nothing, "404")
-    _trim_assert(length(r.endpoints) == 7, "route table size")
+    _trim_assert(length(r.endpoints) == 9, "route table size")
+
+    # catch-all: binds the slash-joined remainder, needs at least one segment
+    ep, pp = _getep(r, "GET", "/docs/guide/intro")
+    _trim_assert(pp[:page] == "guide/intro", "catch-all capture")
+    resp = Servo.handle(ep, pp, TrimRequest())
+    _trim_assert(resp.status == 200 && resp.body == "doc:guide/intro", "catch-all bound value")
+    _trim_assert(Servo.matchroute(r, "GET", "/docs") === nothing, "catch-all needs a segment")
+
+    # raw handler: pathparams() ambient access, Response passthrough
+    ep, pp = _getep(r, "GET", "/mirror/9/x/y")
+    resp = Servo.handle(ep, pp, TrimRequest())
+    _trim_assert(resp.status == 200 && resp.body == "mirror:9", "raw handler")
     return nothing
 end
 

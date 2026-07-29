@@ -125,6 +125,140 @@ end
     @test Set(ep.method for ep in r.endpoints) == Set([:GET, :PUT])
 end
 
+@testset "wildcards & catch-alls" begin
+    r = Servo.Router()
+    tep(method, path; params=Servo.Param[]) = Servo.register!(r, Servo.Endpoint(;
+        method, path, target=() -> 1, params, auth=Servo.Public(), format=Servo.TextFormat()))
+
+    # `*` matches any single segment, binds nothing
+    tep(:GET, "/files/*/meta")
+    m = Servo.matchroute(r, "GET", "/files/anything/meta")
+    @test m isa Tuple && isempty(m[2])
+    @test Servo.matchroute(r, "GET", "/files/a/b/meta") === nothing
+
+    # `{name...}` matches the remainder (at least one segment), binds it joined
+    tep(:GET, "/files/{path...}"; params=[Servo.Param(:path, String, :path)])
+    m = Servo.matchroute(r, "GET", "/files/a/b/c.txt")
+    @test m isa Tuple && m[2] == Dict(:path => "a/b/c.txt")
+    m = Servo.matchroute(r, "GET", "/files/solo")
+    @test m isa Tuple && m[2] == Dict(:path => "solo")
+    @test Servo.matchroute(r, "GET", "/files") === nothing
+
+    # anonymous `**`: matches the remainder, binds nothing
+    tep(:GET, "/pub/**")
+    m = Servo.matchroute(r, "GET", "/pub/x/y/z")
+    @test m isa Tuple && isempty(m[2])
+    @test Servo.matchroute(r, "GET", "/pub") === nothing
+
+    # grammar/validation errors
+    @test_throws ArgumentError tep(:GET, "/a/**/b")                       # catch-all not final
+    @test_throws ArgumentError tep(:GET, "/a/{x...}/b"; params=[Servo.Param(:x, String, :path)])
+    @test_throws ArgumentError tep(:GET, "/a/{x}/{x...}"; params=[Servo.Param(:x, String, :path)])
+    @test_throws ArgumentError tep(:GET, "/a/{x...}"; params=[Servo.Param(:x, Int, :path)])  # catch-all must be String
+    @test_throws ArgumentError tep(:GET, "/a/b{x}c")
+
+    # shape conflicts: `{id}` vs `*` and `{rest...}` vs `**` match the same requests
+    n = length(r.endpoints)
+    @test_logs (:warn, r"replacing") tep(:GET, "/files/{f}/meta"; params=[Servo.Param(:f, String, :path)])
+    @test_logs (:warn, r"replacing") tep(:GET, "/pub/{rest...}"; params=[Servo.Param(:rest, String, :path)])
+    @test length(r.endpoints) == n
+
+    # macro form: a named catch-all binds like any other path parameter
+    ep = Servo.@GET r "/docs/{page...}" public format=Servo.TextFormat() function docpage(page::String)
+        "doc:$page"
+    end
+    @test [(p.name, p.source, p.type) for p in ep.params] == [(:page, :path, String)]
+    m = Servo.matchroute(r, "GET", "/docs/guide/intro")
+    @test m isa Tuple
+    resp = Servo.handle(m[1], m[2], TestRequest())
+    @test resp.status == 200 && String(resp.body) == "doc:guide/intro"
+end
+
+@testset "specificity" begin
+    # leftmost segment rank decides: literal > {name}/* > catch-all — and the
+    # winner is independent of registration order
+    function build(order)
+        r = Servo.Router()
+        tep(path; params=Servo.Param[]) = Servo.register!(r, Servo.Endpoint(;
+            method=:GET, path, target=() -> 1, params, auth=Servo.Public(), format=Servo.TextFormat()))
+        specs = Dict(
+            "/a/{x}/c" => [Servo.Param(:x, String, :path)],
+            "/{y}/b/c" => [Servo.Param(:y, String, :path)],
+            "/a/**" => Servo.Param[],
+            "/a/{x}/{z}" => [Servo.Param(:x, String, :path), Servo.Param(:z, String, :path)],
+        )
+        for p in order
+            tep(p; params=specs[p])
+        end
+        return r
+    end
+    for order in (["/a/{x}/c", "/{y}/b/c", "/a/**", "/a/{x}/{z}"],
+                  ["/a/**", "/a/{x}/{z}", "/{y}/b/c", "/a/{x}/c"])
+        r = build(order)
+        m = Servo.matchroute(r, "GET", "/a/b/c")
+        @test m isa Tuple && m[1].path == "/a/{x}/c"      # leftmost literal wins
+        m = Servo.matchroute(r, "GET", "/a/q/z")
+        @test m isa Tuple && m[1].path == "/a/{x}/{z}"    # fixed-length beats catch-all
+        m = Servo.matchroute(r, "GET", "/a/only")
+        @test m isa Tuple && m[1].path == "/a/**"         # catch-all still catches the rest
+    end
+end
+
+@testset "raw handlers" begin
+    r = Servo.Router()
+
+    # auth is not an escape hatch: raw routes must declare it too
+    e = @test_throws ArgumentError Servo.register!(r, :GET, "/raw", req -> Servo.Response(200, "x"))
+    @test occursin("auth", e.value.msg)
+
+    # raw handler: gets the raw transport request, reads captures via pathparams()
+    ep = Servo.register!(r, "GET", "/raw/{id}/**", function rawroute(req)
+        pp = Servo.pathparams()
+        Servo.Response(200, "id=$(pp[:id]) type=$(nameof(typeof(req)))")
+    end; auth=Servo.Public())
+    @test ep isa Servo.Endpoint
+    @test ep.method == :GET   # String method accepted
+    @test [(p.name, p.source) for p in ep.params] == [(:id, :path)]  # captures introspectable
+    m = Servo.matchroute(r, "GET", "/raw/7/a/b")
+    @test m isa Tuple
+    resp = Servo.handle(m[1], m[2], TestRequest())
+    @test resp.status == 200 && String(resp.body) == "id=7 type=TestRequest"
+    @test Servo.pathparams() == Dict{Symbol, String}()  # ambient state cleared
+
+    # non-Response returns: value -> serialized with the route's format; nothing -> 204
+    Servo.register!(r, :GET, "/rawval", req -> "plain"; auth=Servo.Public())
+    m = Servo.matchroute(r, "GET", "/rawval")
+    resp = Servo.handle(m[1], m[2], TestRequest())
+    @test resp.status == 200 && String(resp.body) == "plain"
+    @test ("Content-Type" => "text/plain; charset=utf-8") in resp.headers
+    Servo.register!(r, :GET, "/rawjson", req -> (; ok = true); auth=Servo.Public(), format=Servo.JSONFormat())
+    m = Servo.matchroute(r, "GET", "/rawjson")
+    resp = Servo.handle(m[1], m[2], TestRequest())
+    @test String(resp.body) == "{\"ok\":true}"
+    Servo.register!(r, :DELETE, "/rawnothing", req -> nothing; auth=Servo.Public())
+    m = Servo.matchroute(r, "DELETE", "/rawnothing")
+    @test Servo.handle(m[1], m[2], TestRequest()).status == 204
+
+    # real auth schemes work on raw routes, and principal() is set
+    Servo.register!(r, :GET, "/rawsecret", req -> "hi $(Servo.principal())"; auth=KeyAuth("sekrit"))
+    m = Servo.matchroute(r, "GET", "/rawsecret")
+    resp = Servo.handle(m[1], m[2], TestRequest(; query=["key" => "sekrit"]))
+    @test String(resp.body) == "hi user-1"
+    e = @test_throws Servo.HTTPError Servo.handle(m[1], m[2], TestRequest(; query=["key" => "nope"]))
+    @test e.value.status == 401
+
+    # public raw routes get the default rate limiting
+    Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=0.1, burst=1.0)
+    try
+        m = Servo.matchroute(r, "GET", "/rawval")
+        @test Servo.handle(m[1], m[2], TestRequest(; ip="9.9.9.9")).status == 200
+        e = @test_throws Servo.HTTPError Servo.handle(m[1], m[2], TestRequest(; ip="9.9.9.9"))
+        @test e.value.status == 429
+    finally
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+end
+
 @testset "binding & coercion over the mock transport" begin
     r = Servo.Router()
 
@@ -274,6 +408,12 @@ end
     Servo.@QUERY r "/find" public function findwidget(w::Widget)
         (; found = w.id, n = length(w.tags))
     end
+    Servo.@GET r "/docs/{page...}" public format=Servo.TextFormat() function docpage(page::String)
+        "doc:$page"
+    end
+    Servo.register!(r, "GET", "/mirror/**", function mirror(req)
+        Servo.Response(200, HTTP.URI(req.target).path)
+    end; auth=Servo.Public())
 
     server = Servo.serve!(r; host="127.0.0.1", port=0)
     try
@@ -318,6 +458,14 @@ end
         resp = HTTP.request("QUERY", base * "/find"; body=JSON.json(Widget(3, ["q"])), status_exception=false)
         @test resp.status == 200
         @test JSON.parse(String(resp.body)).found == 3
+
+        # catch-all endpoint: slash-joined, percent-decoded per segment
+        @test String(get("/docs/guide/intro").body) == "doc:guide/intro"
+        @test String(get("/docs/a%20b/c").body) == "doc:a b/c"
+        @test get("/docs").status == 404
+
+        # raw handler over real HTTP
+        @test String(get("/mirror/x/y").body) == "/mirror/x/y"
     finally
         close(server)
     end

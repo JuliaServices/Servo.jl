@@ -25,6 +25,29 @@ const METHODS = (:GET, :POST, :PUT, :DELETE, :PATCH, :QUERY)
 const BODYLESS_METHODS = (:GET, :DELETE)  # QUERY carries a request body by design
 
 """
+    Servo.Segment
+
+One parsed segment of an endpoint path pattern. `kind` is one of:
+
+- `:literal` — matches exactly its text
+- `:capture` — `{name}`: matches any single segment, binds it as a path parameter
+- `:wildcard` — `*`: matches any single segment, binds nothing
+- `:catchall` — `{name...}` or `**`: matches all remaining segments (at least
+  one; must be the final segment). The named form binds the slash-joined
+  remainder as a `String`; `**` binds nothing.
+"""
+struct Segment
+    kind::Symbol
+    text::String
+    sym::Symbol   # Symbol(text), precomputed so matching never interns
+end
+Segment(kind::Symbol, text::AbstractString="") = Segment(kind, String(text), Symbol(text))
+
+"""the path-parameter names a pattern binds (captures + named catch-all)"""
+placeholdersyms(segments::Vector{Segment}) =
+    Symbol[s.sym for s in segments if (s.kind === :capture || s.kind === :catchall) && !isempty(s.text)]
+
+"""
     Servo.Endpoint(; method, path, target, params=Param[], auth, name="", format=JSONFormat())
 
 One unit of exposed functionality: an addressable `method` + `path` routed to a
@@ -59,7 +82,7 @@ struct Endpoint
     name::String
     method::Symbol
     path::String
-    segments::Vector{Union{String, Symbol}}
+    segments::Vector{Segment}
     params::Vector{Param}
     target::Any   # introspection only; requests are invoked through `handler`
     binder::Any   # introspection/inference only; wrapped inside `handler`
@@ -95,9 +118,24 @@ struct Binder{F}
 end
 (b::Binder)(fmt, pathparams, query, body) = b.f(fmt, pathparams, query, body)
 
+"""
+    RawFn(f)
+
+Wrapper for a raw route handler `f(request) -> result` — the same non-`Function`
+trick as [`Binder`](@ref), preserving the handler's concrete type through
+keyword arguments so the route's `RawHandler` construction and per-request call
+stay statically dispatched. Deliberately not callable: the request pipeline
+calls `f` directly, so the dispatch target is the handler's own method (typing
+the handler's request argument, e.g. `f(req::HTTP.Request)`, is what lets the
+trim verifier resolve the call).
+"""
+struct RawFn{F}
+    f::F
+end
+
 function Endpoint(; method::Symbol, path::AbstractString, target,
                     params::Vector{Param}=Param[], auth=nothing, binder=nothing,
-                    name::AbstractString="", format::Format=JSONFormat())
+                    rawhandler=nothing, name::AbstractString="", format::Format=JSONFormat())
     auth === nothing && throw(ArgumentError(
         "endpoint `$method $path` does not declare an auth scheme: pass `auth=Servo.Public()` " *
         "to explicitly expose it without authentication, or provide a `Servo.AuthScheme`"))
@@ -109,34 +147,51 @@ function Endpoint(; method::Symbol, path::AbstractString, target,
     segments = parsepattern(path)
     validateparams(method, path, segments, params)
     nm = isempty(name) ? "$method $path" : String(name)
+    if rawhandler !== nothing
+        binder === nothing || throw(ArgumentError(
+            "endpoint `$method $path`: `binder` and `rawhandler` are mutually exclusive"))
+        rh = rawhandler isa RawFn ? rawhandler : RawFn(rawhandler)
+        handler = HandlerFn(RawHandler(nm, rh, auth, format))
+        return Endpoint(nm, method, String(path), segments, params, target, nothing, auth, format, handler)
+    end
     b = binder === nothing ? GenericBinder(target, params) :
         (binder isa Binder || binder isa GenericBinder) ? binder : Binder(binder)
     handler = HandlerFn(RequestHandler(nm, b, auth, format))
     return Endpoint(nm, method, String(path), segments, params, target, b, auth, format, handler)
 end
 
-# "/users/{id}/orders" -> ["users", :id, "orders"]
+# "/users/{id}/files/{path...}" -> [literal "users", capture :id, literal "files", catchall :path]
 function parsepattern(path::AbstractString)
     startswith(path, "/") || throw(ArgumentError("endpoint path must start with '/': `$path`"))
-    segments = Union{String, Symbol}[]
-    for seg in split(path, '/'; keepempty=false)
-        m = match(r"^\{(\w+)\}$", seg)
-        if m !== nothing
-            s = Symbol(m.captures[1])
-            s in segments && throw(ArgumentError("duplicate path parameter `{$s}` in `$path`"))
-            push!(segments, s)
+    parts = split(path, '/'; keepempty=false)
+    segments = Segment[]
+    for (i, seg) in enumerate(parts)
+        m = match(r"^\{(\w+)(\.\.\.)?\}$", seg)
+        s = if seg == "*"
+            Segment(:wildcard)
+        elseif seg == "**"
+            Segment(:catchall)
+        elseif m !== nothing
+            name = m.captures[1]
+            Symbol(name) in placeholdersyms(segments) &&
+                throw(ArgumentError("duplicate path parameter `$name` in `$path`"))
+            Segment(m.captures[2] === nothing ? :capture : :catchall, name)
         elseif occursin('{', seg) || occursin('}', seg)
             throw(ArgumentError(
-                "malformed segment `$seg` in `$path`: a path parameter must be a full segment like `{name}`"))
+                "malformed segment `$seg` in `$path`: a path parameter must be a full segment " *
+                "like `{name}` (or `{name...}` for a trailing catch-all)"))
         else
-            push!(segments, String(seg))
+            Segment(:literal, seg)
         end
+        s.kind === :catchall && i != length(parts) && throw(ArgumentError(
+            "`$seg` in `$path`: a catch-all (`**` or `{name...}`) must be the final segment"))
+        push!(segments, s)
     end
     return segments
 end
 
-function validateparams(method::Symbol, path::AbstractString, segments, params::Vector{Param})
-    placeholders = Symbol[s for s in segments if s isa Symbol]
+function validateparams(method::Symbol, path::AbstractString, segments::Vector{Segment}, params::Vector{Param})
+    placeholders = placeholdersyms(segments)
     pathnames = [p.name for p in params if p.source == :path]
     for s in placeholders
         s in pathnames || throw(ArgumentError(
@@ -145,6 +200,15 @@ function validateparams(method::Symbol, path::AbstractString, segments, params::
     for p in pathnames
         p in placeholders || throw(ArgumentError(
             "`$method $path`: argument `$p` is marked as a path parameter but the path has no `{$p}` segment"))
+    end
+    if !isempty(segments) && last(segments).kind === :catchall && !isempty(last(segments).text)
+        ca = last(segments)
+        for p in params
+            p.source == :path && p.name == ca.sym && !(p.type === String || p.type === Any) &&
+                throw(ArgumentError(
+                    "`$method $path`: catch-all parameter `{$(ca.text)...}` binds the slash-joined " *
+                    "remaining path; declare it as `$(ca.text)::String` (got $(p.type))"))
+        end
     end
     bodyidxs = findall(p -> p.source == :body, params)
     if !isempty(bodyidxs)

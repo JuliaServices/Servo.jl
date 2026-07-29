@@ -61,7 +61,7 @@ struct Endpoint          # concrete: no type parameters
     name::String                            # e.g. "simulate" (the function name)
     method::Symbol                          # :GET, :POST, :PUT, :DELETE, :PATCH, :QUERY
     path::String                            # "/v1/users/{id}"
-    segments::Vector{Union{String, Symbol}} # parsed pattern; Symbols are captures
+    segments::Vector{Segment}               # parsed pattern (see Routing below)
     params::Vector{Param}                   # name, type, source, required
     target::Any                             # the domain function (introspection)
     binder::Any                             # (format, pathparams, query, body) -> result
@@ -130,6 +130,65 @@ A handler may return:
 
 Errors serialize into a stable envelope with the endpoint's format:
 `{"error": {"message": ..., "code": ...}}`.
+
+## Routing
+
+`Servo.Router` speaks (a superset of) HTTP.Router's route grammar, per segment:
+
+| pattern | matches | binds |
+|---|---|---|
+| `widgets` | exactly `widgets` | — |
+| `{id}` | any single segment | `id`, coerced to the argument's type |
+| `*` | any single segment | nothing |
+| `{rest...}` | all remaining segments (≥1; final only) | `rest::String`, slash-joined |
+| `**` | all remaining segments (≥1; final only) | nothing |
+
+The named catch-all is a Servo addition — HTTP.Router's `**` can't expose what
+it matched. `{id:regex}` constraints are deliberately dropped: their dominant
+use (reject non-numeric ids) is better served by typed parameters (`id::Int` →
+400 with a message); routing-fallthrough-by-regex can return later as a capture
+constraint if ever needed.
+
+**Specificity is specified, not emergent.** When several patterns match,
+compare them segment-by-segment from the left — literal > single-segment match
+(`{name}`/`*`) > catch-all — first difference wins, full tie goes to the
+earlier registration. This reproduces HTTP.Router's exact-first backtracking
+winner on every overlap, but as a two-line documented rule. Registering a
+second route with the same *match shape* (`/users/{id}` vs `/users/*`) replaces
+the first with a warning. Matching is a linear scan over the introspectable
+`Vector{Endpoint}` — at real app scale that's noise, and a derived index can
+appear behind `matchroute` later without any interface change.
+
+**Raw handlers** are the escape hatch (and the HTTP.Router migration path) for
+routes that don't fit the endpoint model — file serving, proxies, protocol
+facades (OAuth callbacks, MCP):
+
+```julia
+Servo.register!(router, :GET, "/files/**", req -> Servo.Response(200, ...);
+                auth=Servo.Public())
+```
+
+The handler gets the raw transport request and returns a `Servo.Response` (or
+`nothing`/a value, serialized with the route's `format`); captures are available
+via `Servo.pathparams()`. No binding, no format negotiation — but **auth is not
+an escape hatch**: raw routes declare `auth` like every other endpoint, public
+ones get the default rate limiting. (Typing the handler's request argument —
+`f(req::HTTP.Request)` — keeps the call trim-verifiable; untyped handlers cost
+one dynamic dispatch.)
+
+### Migrating from HTTP.Router
+
+- `register!(r, "GET", "/api/thing/{id}", handler)` → same call plus `auth=...`;
+  handlers return `Servo.Response` instead of `HTTP.Response`, read captures
+  from `Servo.pathparams()` instead of `HTTP.getparams(req)` — or better, become
+  bound endpoints and receive typed arguments.
+- `*` positional wildcards (league-easy's `extract_path_param(req, 3)` pattern)
+  → name the segment (`{id}`) and take it as an argument; index drift disappears.
+- `{id:[0-9]+}` → `id::Int`.
+- The nested-router auth pattern (`register!(pub, "/v1/**", authed_router)`) has
+  no equivalent because it has no *need*: auth is declared per endpoint.
+- Method-wildcard registrations (mostly used for those mounts) are dropped;
+  OPTIONS is handled centrally by the CORS middleware.
 
 ## Seam 1: Format (serialization)
 

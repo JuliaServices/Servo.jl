@@ -104,7 +104,7 @@ function endpointexpr(method::Symbol, args...)
         "@$method \"$path\" does not declare an auth scheme: every endpoint must either be " *
         "explicitly `public` or provide a `Servo.AuthScheme`, e.g. " *
         "`Servo.@$method \"$path\" public function ... end`"))
-    placeholders = Symbol[s for s in parsepattern(path) if s isa Symbol]
+    placeholders = placeholdersyms(parsepattern(path))
     fname, specs = parsesignature(funcdef, placeholders)
     paramexprs = [:(Servo.Param($(QuoteNode(s.name)), $(esc(s.type)), $(QuoteNode(s.source)), $(s.required)))
                   for s in specs]
@@ -167,9 +167,11 @@ Define a function and register it as an endpoint in one step. The binding of
 transport data to arguments is derived from the path and the function signature:
 
 - a positional argument whose name matches a `{segment}` in the path binds that
-  path parameter, coerced to the argument's declared type;
+  path parameter, coerced to the argument's declared type; a trailing `{name...}`
+  catch-all segment binds the slash-joined remaining path as a `String` (paths
+  may also use `*`/`**` to match without binding);
 - the final positional argument *not* matching a path parameter binds the request
-  body, deserialized with the endpoint's format (`POST`/`PUT`/`PATCH` only);
+  body, deserialized with the endpoint's format (`POST`/`PUT`/`PATCH`/`QUERY` only);
 - keyword arguments bind query parameters (coerced to their declared types);
   keywords without defaults are required and produce a 400 when absent.
 

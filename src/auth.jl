@@ -39,6 +39,7 @@ struct Public <: AuthScheme end
 # harness allowlists until a Julia release fixes it.)
 const PRINCIPAL = ScopedValue{Any}(nothing)
 const REQUEST = ScopedValue{Any}(nothing)
+const PATHPARAMS = ScopedValue{Dict{Symbol, String}}(Dict{Symbol, String}())
 
 """
     Servo.principal()
@@ -55,3 +56,13 @@ The raw transport request currently being handled (e.g. an `HTTP.Request`), or
 `nothing` outside a handler call.
 """
 request() = REQUEST[]
+
+"""
+    Servo.pathparams() -> Dict{Symbol, String}
+
+The path parameters captured by the matched route pattern, exactly as they
+appeared in the request path. Bound endpoints receive these as typed function
+arguments already; this accessor exists for raw handlers (registered via
+`register!(router, method, path, handler; ...)`), where no binding happens.
+"""
+pathparams() = PATHPARAMS[]

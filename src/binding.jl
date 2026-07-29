@@ -87,16 +87,42 @@ struct RequestHandler{B, A <: AuthScheme, S <: Format} <: Function
 end
 
 function (h::RequestHandler)(call::HandlerCall)
-    if h.auth isa Public
-        checkratelimit!(h.name, call.clientip)
-        pr = nothing
-    else
-        pr = authenticate(h.auth, call.req)
-        pr === nothing && throw(HTTPError(401, "unauthorized"))
-    end
-    return @with PRINCIPAL => pr REQUEST => call.req begin
+    pr = checkauth(h.name, h.auth, call)
+    return @with PRINCIPAL => pr REQUEST => call.req PATHPARAMS => call.pathparams begin
         toresponse(h.format, h.binder(h.format, call.pathparams, call.query, call.body))
     end
+end
+
+"""
+The pipeline for raw-handler routes (see `Servo.register!(router, method, path,
+handler; ...)`): same auth/rate-limit gate and ambient request context as bound
+endpoints, but the handler receives the raw transport request and does its own
+request reading — no argument binding. Path parameters captured by the route
+pattern are available via `Servo.pathparams()`.
+"""
+struct RawHandler{F, A <: AuthScheme, S <: Format} <: Function
+    name::String
+    f::F
+    auth::A
+    format::S
+end
+
+function (h::RawHandler)(call::HandlerCall)
+    pr = checkauth(h.name, h.auth, call)
+    return @with PRINCIPAL => pr REQUEST => call.req PATHPARAMS => call.pathparams begin
+        toresponse(h.format, h.f.f(call.req))
+    end
+end
+
+# the shared gate: authenticate, or rate-limit an explicitly-Public route
+function checkauth(name::String, auth::AuthScheme, call::HandlerCall)
+    if auth isa Public
+        checkratelimit!(name, call.clientip)
+        return nothing
+    end
+    pr = authenticate(auth, call.req)
+    pr === nothing && throw(HTTPError(401, "unauthorized"))
+    return pr
 end
 
 toresponse(::Format, r::Response) = r
