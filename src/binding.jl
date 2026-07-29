@@ -88,17 +88,19 @@ end
 
 hasquery(q::Dict{String, String}, name::String) = haskey(q, name)
 
-function pathvalue(::Type{T}, pathparams::AbstractDict{Symbol, <:AbstractString}, name::Symbol) where {T}
+# return annotations keep binders fully inferable (so e.g. response types can be
+# derived from a binder's return type) even when the request type is abstract
+function pathvalue(::Type{T}, pathparams::AbstractDict{Symbol, <:AbstractString}, name::Symbol)::T where {T}
     return coerceparam(T, pathparams[name], name)
 end
 
-function queryvalue(::Type{T}, q::Dict{String, String}, name::Symbol) where {T}
+function queryvalue(::Type{T}, q::Dict{String, String}, name::Symbol)::T where {T}
     raw = get(q, String(name), nothing)
     raw === nothing && throw(HTTPError(400, "missing required query parameter `$name`"))
     return coerceparam(T, raw, name)
 end
 
-function bodyvalue(fmt::Format, ::Type{T}, req, name::Symbol) where {T}
+function bodyvalue(fmt::Format, ::Type{T}, req, name::Symbol)::T where {T}
     body = rawbody(req)
     (body === nothing || isempty(body)) &&
         throw(HTTPError(400, "request body required for `$name`"))
