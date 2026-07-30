@@ -9,7 +9,7 @@ function clientip(req::HTTP.Request)
     # trust X-Forwarded-For when present (set by the load balancer in real deploys)
     xff = HTTP.header(req, "X-Forwarded-For", "")
     isempty(xff) || return String(strip(first(split(xff, ','))))
-    return get(req.context, :peerip, nothing)
+    return get(HTTP.get_request_context(req), :peerip, nothing)
 end
 
 """
@@ -32,7 +32,7 @@ function httphandler(router::Router)
                 throw(HTTPError(405, "$(req.method) not allowed for $(target.path)"))
             ep, pathparams = m
             resp = handle(ep, pathparams, req)
-            return HTTP.Response(resp.status, resp.headers, resp.body)
+            return HTTP.Response(resp.status; headers=resp.headers, body=resp.body)
         catch e
             e isa HTTPError && return errorresponse(ep, e.status, e.message)
             @error "unhandled exception in endpoint $(ep === nothing ? "<unmatched>" : ep.name)" exception=(e, catch_backtrace())
@@ -48,9 +48,17 @@ function errorresponse(ep::Union{Endpoint, Nothing}, status::Int, message::Strin
         catch
             message
         end
-        return HTTP.Response(status, ["Content-Type" => mime(ep.format)], body)
+        return HTTP.Response(
+            status;
+            headers=["Content-Type" => mime(ep.format)],
+            body,
+        )
     end
-    return HTTP.Response(status, ["Content-Type" => "text/plain; charset=utf-8"], message)
+    return HTTP.Response(
+        status;
+        headers=["Content-Type" => "text/plain; charset=utf-8"],
+        body=message,
+    )
 end
 
 const CORS_HEADERS = [
@@ -86,20 +94,37 @@ end
 Start (non-blocking) an HTTP server for a router and return the server handle
 (`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
 loads config and applies profile conventions; `serve!` is the bare transport
-entrypoint. Remaining `kw` pass through to `HTTP.serve!`.
+entrypoint. Remaining `kw` pass through to `HTTP.listen!`.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
                 cors::Bool=false, accesslog::Bool=false, kw...)
     handler = httphandler(router)
     cors && (handler = cors_middleware(handler))
     accesslog && (handler = accesslog_middleware(handler))
-    streamhandler = HTTP.streamhandler(handler)
-    return HTTP.serve!(host, port; stream=true, kw...) do stream
-        peer = try Sockets.getpeername(stream) catch; nothing end
-        peer === nothing || (stream.message.context[:peerip] = peer[1])
-        streamhandler(stream)
+
+    # Use HTTP.jl's stream server because it exposes the transport peer before
+    # the request handler runs. The public `peeraddr` API works for HTTP/1 and
+    # HTTP/2, including TLS connections.
+    return HTTP.listen!(host, port; kw...) do stream
+        peer = HTTP.peeraddr(stream)
+        requesthandler = HTTP.streamhandler() do req
+            peer === nothing ||
+                (HTTP.get_request_context(req)[:peerip] = _peerip(peer))
+            return handler(req)
+        end
+        return requesthandler(stream)
     end
 end
 
+function _peerip(peer)
+    endpoint = string(peer)
+    if startswith(endpoint, '[')
+        closing = findfirst(==(']'), endpoint)
+        closing === nothing || return endpoint[2:prevind(endpoint, closing)]
+    end
+    parts = rsplit(endpoint, ':'; limit=2)
+    return length(parts) == 2 ? first(parts) : endpoint
+end
+
 """the local port a server (returned by `serve!`/`run!`) is bound to"""
-port(server::HTTP.Server) = Int(Sockets.getsockname(server.listener.server)[2])
+port(server::HTTP.Server) = HTTP.port(server)

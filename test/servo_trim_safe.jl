@@ -12,9 +12,9 @@
 #
 # Known upstream trim limitations (allowlisted by the harness, see
 # trim_compile_tests.jl): Base.ScopedValues scope storage is not yet
-# trim-verifiable, and HTTP 1.x's TLS init requires Julia >= 1.13. Typed
-# `JSON.parse` materialization is likewise a known JSON.jl gap, so the JSON
-# format is exercised on the write side (TextFormat covers body binding).
+# trim-verifiable. Typed `JSON.parse` materialization is likewise a known
+# JSON.jl gap, so the JSON format is exercised on the write side (TextFormat
+# covers body binding).
 using Servo, JSON
 
 struct TrimRequest

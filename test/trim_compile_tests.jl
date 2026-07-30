@@ -8,8 +8,6 @@ const _TRIM_UPSTREAM_PATTERNS = [
     # Base.ScopedValues scope storage (a HAMT keyed by an abstract type): not
     # yet trim-verifiable (still fails on 1.13.0-rc1 and 1.14.0-DEV as of 2026-07)
     r"HashArrayMappedTries|ScopedValues|PersistentDict",
-    # HTTP 1.x TLS stack __init__ cfunctions (fixed in Julia 1.13.0-rc1)
-    r"MbedTLS|OpenSSL",
     # Base stream callback machinery reachable via the TLS io layer
     r"uv_readcb|LibuvStream|readcb_specialized",
 ]
@@ -200,7 +198,7 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
                 @test !run_timed_out
                 @test run_exit == 0
             else
-                println("[trim] $(trim_errors) known upstream verifier finding(s) (ScopedValues/TLS init; see _TRIM_UPSTREAM_PATTERNS) — full trim compilation requires a newer Julia; skipping executable run")
+                println("[trim] $(trim_errors) known upstream verifier finding(s) (ScopedValues/stream callbacks; see _TRIM_UPSTREAM_PATTERNS) — full trim compilation requires a newer Julia; skipping executable run")
                 @test exit_code != 0
             end
         end

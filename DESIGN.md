@@ -350,9 +350,6 @@ Current upstream status (2026-07):
 
 - **Base.ScopedValues** scope storage (a HAMT keyed by an abstract type) is not
   yet trim-verifiable — still fails on 1.13.0-rc1 and 1.14.0-DEV.
-- **HTTP 1.x TLS init** (MbedTLS/OpenSSL `__init__` cfunctions) fails on 1.12
-  but is **fixed in Julia 1.13.0-rc1** (verified: a `using HTTP` binary
-  trim-compiles clean there).
 - **Typed `JSON.parse` materialization** is a known JSON.jl gap (see JSON's own
   trim entrypoints test); the workload covers `JSON.json` writing and verifies
   Servo's body-binding path via `TextFormat`.

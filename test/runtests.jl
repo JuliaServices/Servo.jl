@@ -414,6 +414,9 @@ end
     Servo.register!(r, "GET", "/mirror/**", function mirror(req)
         Servo.Response(200, HTTP.URI(req.target).path)
     end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/transport", function transport(req)
+        Servo.Response(200, "$(req.proto_major)|$(Servo.clientip(req))")
+    end; auth=Servo.Public())
 
     server = Servo.serve!(r; host="127.0.0.1", port=0)
     try
@@ -466,6 +469,12 @@ end
 
         # raw handler over real HTTP
         @test String(get("/mirror/x/y").body) == "/mirror/x/y"
+
+        # The same server accepts cleartext HTTP/2 prior knowledge. This also
+        # verifies that peer-address capture remains available on an h2 stream.
+        resp = HTTP.get(base * "/transport"; protocol=:h2, status_exception=false)
+        @test resp.status == 200
+        @test String(resp.body) == "2|127.0.0.1"
     finally
         close(server)
     end

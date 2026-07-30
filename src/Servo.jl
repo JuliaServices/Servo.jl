@@ -1,6 +1,6 @@
 module Servo
 
-using Logging, Sockets
+using Logging
 using Base.ScopedValues
 import Figgy, HTTP
 
