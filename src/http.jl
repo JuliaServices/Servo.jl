@@ -5,6 +5,15 @@
 rawbody(req::HTTP.Request) = req.body
 rawquery(req::HTTP.Request) = HTTP.URIs.queryparampairs(HTTP.URI(req.target))
 
+function bearertoken(req::HTTP.Request)
+    header = strip(String(HTTP.header(req, "Authorization", "")))
+    isempty(header) && return nothing
+    parts = split(header)
+    length(parts) == 2 || return nothing
+    lowercase(String(parts[1])) == "bearer" || return nothing
+    return String(parts[2])
+end
+
 function clientip(req::HTTP.Request)
     # trust X-Forwarded-For when present (set by the load balancer in real deploys)
     xff = HTTP.header(req, "X-Forwarded-For", "")

@@ -250,6 +250,7 @@ now.
 abstract type AuthScheme end
 authenticate(scheme, request) -> principal | nothing   # nothing ⇒ 401
 struct Public <: AuthScheme end                        # explicit opt-out
+BearerAuth(validator)                                  # standard bearer flow
 ```
 
 **Every endpoint must declare `auth`.** The macros accept the literal `public`
@@ -265,10 +266,15 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
 - `Public` endpoints skip authentication but get the default **rate limiter**
   installed by `run!`: a token bucket keyed by (endpoint, client IP), configured
   via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20).
-- Phase 2 (deliberately not designed yet): concrete schemes (JWT/OIDC verify, API
-  keys, HMAC sessions), an authorization layer (roles/permissions), and a
-  context-loading seam like Roam's `AUTH_CONTEXT_LOADER`. The `authenticate`
-  contract is the stable base all of that builds on.
+- `BearerAuth(validator)` implements the shared bearer flow. Servo extracts the
+  token with `bearertoken(request)`, then calls
+  `authenticatebearer(validator, token, request)`. Its default method invokes
+  `validator(token, request)`. An application can use a function or extend
+  `authenticatebearer` for its own validator type. The validator owns token
+  verification, token-store checks, and construction of the principal.
+- Concrete JWT/OIDC providers, API keys, HMAC sessions, and application
+  authorization rules remain outside Servo. The `authenticate` contract and
+  `BearerAuth` validator seam are the stable base for those policies.
 
 ## Declaring endpoints
 
@@ -365,4 +371,4 @@ boundary), and one-concrete-source-per-call Figgy loading.
 
 Resource lifecycle hooks (DB pools etc.), background/scheduled task registry,
 metrics/observability, streaming responses (SSE), config schemas/validation,
-concrete auth schemes and authorization, request-id propagation.
+provider-specific auth schemes, authorization policies, request-id propagation.

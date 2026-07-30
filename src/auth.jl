@@ -24,6 +24,53 @@ abstract type AuthScheme end
 function authenticate end
 
 """
+    Servo.BearerAuth(validator)
+
+Authenticate a request that carries an `Authorization: Bearer <token>` value.
+Servo extracts the token through the transport hook
+[`Servo.bearertoken`](@ref), then calls:
+
+    Servo.authenticatebearer(validator, token, request) -> principal | nothing
+
+The returned principal follows the normal [`Servo.AuthScheme`](@ref) contract.
+Return `nothing` for a missing or invalid credential, or throw
+[`Servo.HTTPError`](@ref) when the application needs a more specific response.
+
+The default `authenticatebearer` method treats `validator` as a callable with
+the signature `(token, request)`. Applications can instead define a validator
+type and extend `Servo.authenticatebearer` for it.
+"""
+struct BearerAuth{V} <: AuthScheme
+    validator::V
+end
+
+"""
+    Servo.bearertoken(request) -> AbstractString | nothing
+
+Extract a bearer token from a transport request. Servo implements this hook for
+`HTTP.Request`. Other transports can extend it when they support bearer
+credentials.
+"""
+function bearertoken end
+
+"""
+    Servo.authenticatebearer(validator, token, request) -> principal | nothing
+
+Validate a bearer token and return the principal that handlers will read with
+[`Servo.principal`](@ref). The fallback invokes `validator(token, request)`.
+Define a more specific method when the validator is a stateful policy object.
+"""
+function authenticatebearer(validator, token::AbstractString, request)
+    return validator(token, request)
+end
+
+function authenticate(auth::BearerAuth, request)
+    token = bearertoken(request)
+    token === nothing && return nothing
+    return authenticatebearer(auth.validator, token, request)
+end
+
+"""
     Public()
 
 Explicitly marks an endpoint as publicly accessible with **no** authentication.

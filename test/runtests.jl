@@ -27,6 +27,22 @@ end
 Servo.authenticate(a::HeaderAuth, req::HTTP.Request) =
     HTTP.header(req, "X-Api-Key", "") == a.key ? "api-user" : nothing
 
+struct TestBearerRequest
+    token::Union{Nothing,String}
+end
+Servo.bearertoken(req::TestBearerRequest) = req.token
+
+struct TestBearerValidator
+    accepted::String
+end
+function Servo.authenticatebearer(
+    validator::TestBearerValidator,
+    token::AbstractString,
+    request::TestBearerRequest,
+)
+    return token == validator.accepted ? (; token, request) : nothing
+end
+
 struct Widget
     id::Int
     tags::Vector{String}
@@ -342,6 +358,16 @@ end
 
     e = @test_throws Servo.HTTPError Servo.handle(ep, NOPARAMS, TestRequest(; query=["key" => "wrong"]))
     @test e.value.status == 401
+
+    # BearerAuth owns the common extraction flow. A validator owns token policy
+    # and can return any useful principal.
+    auth = Servo.BearerAuth(TestBearerValidator("open-sesame"))
+    request = TestBearerRequest("open-sesame")
+    principal = Servo.authenticate(auth, request)
+    @test principal.token == "open-sesame"
+    @test principal.request === request
+    @test Servo.authenticate(auth, TestBearerRequest("wrong")) === nothing
+    @test Servo.authenticate(auth, TestBearerRequest(nothing)) === nothing
 end
 
 @testset "rate limiting" begin
@@ -402,6 +428,11 @@ end
     Servo.@GET r "/secret" HeaderAuth("open-sesame") function secret()
         (; principal = Servo.principal())
     end
+    Servo.@GET r "/bearer" Servo.BearerAuth(
+        (token, _request) -> token == "open-sesame" ? "bearer-user" : nothing,
+    ) function bearer()
+        (; principal = Servo.principal())
+    end
     Servo.@GET r "/boom" public function boom()
         error("kaboom")
     end
@@ -446,6 +477,16 @@ end
         @test get("/secret").status == 401
         resp = get("/secret"; headers=["X-Api-Key" => "open-sesame"])
         @test resp.status == 200 && JSON.parse(String(resp.body)).principal == "api-user"
+
+        # Servo parses the standard scheme and passes only the token to the
+        # application validator.
+        @test get("/bearer").status == 401
+        @test get("/bearer"; headers=["Authorization" => "Basic open-sesame"]).status == 401
+        @test get("/bearer"; headers=["Authorization" => "Bearer"]).status == 401
+        @test get("/bearer"; headers=["Authorization" => "Bearer open sesame"]).status == 401
+        resp = get("/bearer"; headers=["Authorization" => "bEaReR open-sesame"])
+        @test resp.status == 200
+        @test JSON.parse(String(resp.body)).principal == "bearer-user"
 
         # routing errors: plain-text envelope (no endpoint matched)
         @test get("/nope").status == 404

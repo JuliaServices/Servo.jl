@@ -36,5 +36,21 @@ Path segments bind positional arguments, the request body binds the trailing
 positional argument, query parameters bind keyword arguments — all coerced to
 the declared types, with 400s (not stringly-typed surprises) on bad input.
 
+Servo also supplies a reusable bearer authentication scheme:
+
+```julia
+function validator(token, request)
+    return token == "secret" ? "user-1" : nothing
+end
+
+Servo.@GET "/v1/private" Servo.BearerAuth(validator) function private_resource()
+    return (; user=Servo.principal())
+end
+```
+
+The validator can verify a JWT, query a token store, and return a rich
+application context. See [DESIGN.md](DESIGN.md#auth) for the complete auth
+interface.
+
 See [DESIGN.md](DESIGN.md) for the full design: the `Format` and transport
 seams, the auth contract, config layering, and what's deliberately deferred.
