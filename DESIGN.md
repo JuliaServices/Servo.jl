@@ -308,7 +308,7 @@ per endpoint.
 ## Running an app
 
 ```julia
-Servo.run!(name, profile; router, host, port, configdir, configs, accesslog, log)
+Servo.run!(name, profile; router, host, port, configdir, configs, setup, accesslog, log)
 Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
 ```
 
@@ -319,10 +319,13 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
    kwarg → explicit `profile` argument → `config-<profile>.toml` →
    `.config-<profile>.toml` (secrets, gitignored). `Servo.config("a.b")` reads it
    anywhere, with dotted-key traversal;
-2. installs the public rate limiter;
-3. registers builtin `GET /status` ("ok") and `GET /version` (the `version`
+2. calls `setup` once. This callback can read the loaded config and perform
+   required idempotent provisioning. A failure stops startup before the
+   listener opens;
+3. installs the public rate limiter;
+4. registers builtin `GET /status` ("ok") and `GET /version` (the `version`
    config key) unless the app already claimed those routes;
-4. serves HTTP with the error-envelope handler, access logging, and — **only on
+5. serves HTTP with the error-envelope handler, access logging, and — **only on
    the `local` profile** — permissive CORS (including OPTIONS preflight,
    centrally, ending 1.x's per-route OPTIONS registration wart).
 
@@ -369,6 +372,6 @@ boundary), and one-concrete-source-per-call Figgy loading.
 
 ## Deliberately deferred
 
-Resource lifecycle hooks (DB pools etc.), background/scheduled task registry,
+Managed cleanup hooks (DB pools etc.), background/scheduled task registry,
 metrics/observability, streaming responses (SSE), config schemas/validation,
 provider-specific auth schemes, authorization policies, request-id propagation.

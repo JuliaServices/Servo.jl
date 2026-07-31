@@ -36,14 +36,22 @@ development; other profiles do not.
 
 Keywords: `router=Servo.ROUTER`, `host="0.0.0.0"`, `port=nothing` (falls back to
 the `port` config key, then 8080), `configdir=nothing`, `configs=Dict()`,
-`accesslog=true`, `log=!isinteractive()`.
+`setup=Returns(nothing)`, `accesslog=true`, `log=!isinteractive()`.
+
+`setup` runs once after configuration is available and before Servo opens the
+listener. Use it for required, idempotent startup work such as creating database
+tables. If it throws, `run!` stops without starting the server.
 """
 function run!(name::AbstractString="Servo", profile::AbstractString="";
               router::Router=ROUTER, host="0.0.0.0", port::Union{Integer, Nothing}=nothing,
               configdir::Union{AbstractString, Nothing}=nothing, configs=Dict{String, Any}(),
-              accesslog::Bool=true, log::Bool=!isinteractive())
+              setup=Returns(nothing), accesslog::Bool=true, log::Bool=!isinteractive())
     @info "$name init" julia=Base.VERSION threads=Threads.nthreads()
     prof = loadconfig!(; profile, configdir, configs, log)
+    # Configuration must be ready before application provisioning runs. The
+    # listener starts later, so a provisioning error cannot expose a partly
+    # initialized service.
+    setup()
     p = _int(something(port, config("port", 8080)))
     PUBLIC_RATE_LIMITER[] = RateLimiter(;
         rps=_float(config("public_ratelimit_rps", 5.0)),

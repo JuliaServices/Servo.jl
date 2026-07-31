@@ -542,11 +542,23 @@ end
         (; msg = Servo.config("greeting"))
     end
 
+    setup_calls = Ref(0)
+    setup_greeting = Ref("")
+    setup = function ()
+        setup_calls[] += 1
+        setup_greeting[] = Servo.config("greeting")
+        return nothing
+    end
     server = Servo.run!("TestApp", "local"; router=r, host="127.0.0.1", port=0,
-                        configdir, configs=Dict("version" => "1.2.3"), accesslog=false, log=false)
+                        configdir, configs=Dict("version" => "1.2.3"), setup,
+                        accesslog=false, log=false)
     try
         port = Servo.port(server)
         base = "http://127.0.0.1:$port"
+
+        # setup runs once, after profile configuration is available.
+        @test setup_calls[] == 1
+        @test setup_greeting[] == "hello local"
 
         # config layering: profile toml overrides base; secrets file and configs loaded
         @test Servo.profile() == "local"
@@ -573,6 +585,21 @@ end
         close(server)
         Servo.PUBLIC_RATE_LIMITER[] = nothing
     end
+
+    # A failed setup stops before Servo registers builtins or opens a listener.
+    failed_router = Servo.Router()
+    @test_throws ErrorException Servo.run!(
+        "TestApp",
+        "local";
+        router=failed_router,
+        host="127.0.0.1",
+        port=0,
+        configdir,
+        setup=() -> error("provisioning failed"),
+        accesslog=false,
+        log=false,
+    )
+    @test isempty(failed_router.endpoints)
 
     # non-local profile: no CORS, and the configured rate limit is enforced
     r2 = Servo.Router()
