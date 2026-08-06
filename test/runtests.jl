@@ -556,4 +556,5 @@ end
 
 end # @testset "Servo"
 
+include("openapi.jl")
 include("trim_compile_tests.jl")
