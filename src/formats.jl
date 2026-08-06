@@ -46,6 +46,24 @@ serialize(::TextFormat, x) = string(x)
 deserialize(::TextFormat, ::Type{Any}, body) = _tostring(body)
 deserialize(::TextFormat, ::Type{T}, body) where {T<:AbstractString} = convert(T, _tostring(body))
 
+"""
+    Servo.errorbody(fmt::Format, message, code) -> AbstractString | AbstractVector{UInt8}
+
+The response body for a request-level error in this format. `JSONFormat` wraps
+the message in the stable `(; error = (; message, code))` envelope; `TextFormat`
+returns the bare message, since a plain-text client cannot parse a printed
+named tuple (and Base's generic tuple `show` machinery is dynamically
+dispatched — unresolvable under juliac --trim).
+
+Deliberately no `::Format` fallback method: `errorresponse` calls this on an
+abstract `Endpoint.format` slot, and that call only union-splits into guarded
+static calls when every applicable method has a concrete format type. A format
+without a method falls back to the bare message via `errorresponse`'s catch.
+"""
+errorbody(fmt::JSONFormat, message::String, code::Int) =
+    serialize(fmt, (; error = (; message, code)))
+errorbody(::TextFormat, message::String, code::Int) = message
+
 # JSONFormat requires the JSON.jl-backed extension; error at endpoint construction
 # time with a fix, rather than a MethodError on the first request.
 function checkformat(f::Format)

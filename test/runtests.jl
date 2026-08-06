@@ -417,6 +417,27 @@ end
     @test e.value.status == 400 && occursin("malformed", e.value.message)
 end
 
+@testset "request-target parsing" begin
+    @test Servo.splittarget("/a/b?x=1") == ("/a/b", "x=1")
+    @test Servo.splittarget("/a/b") == ("/a/b", "")
+    @test Servo.splittarget("/?") == ("/", "")
+
+    @test Servo.percentdecode("plain") == "plain"
+    @test Servo.percentdecode("a%20b") == "a b"
+    @test Servo.percentdecode("%2Fetc%2f") == "/etc/"       # hex is case-insensitive
+    @test Servo.percentdecode("a+b") == "a+b"               # '+' is literal in paths
+    @test Servo.percentdecode("a+b"; plus=true) == "a b"    # ...but a space in queries
+    @test Servo.percentdecode("100%") == "100%"             # malformed escapes pass through
+    @test Servo.percentdecode("%GG%1") == "%GG%1"
+
+    @test Servo.querypairs("") == Pair{String, String}[]
+    @test Servo.querypairs("a=1&b=two") == ["a" => "1", "b" => "two"]
+    @test Servo.querypairs("tag=a%20b&flag") == ["tag" => "a b", "flag" => ""]
+    @test Servo.querypairs("q=a+b") == ["q" => "a b"]
+    @test Servo.querypairs("&&a=1&") == ["a" => "1"]
+    @test Servo.querypairs("=v") == ["" => "v"]
+end
+
 @testset "HTTP transport end-to-end" begin
     r = Servo.Router()
     Servo.@GET r "/hello/{name}" public function hello(name::String; excited::Bool=false)
