@@ -645,4 +645,5 @@ end
 
 end # @testset "Servo"
 
+include("openapi_tests.jl")
 include("trim_compile_tests.jl")
