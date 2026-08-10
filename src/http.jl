@@ -178,12 +178,18 @@ function accesslog_middleware(handler)
 end
 
 """
-    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080, cors=false, accesslog=false, kw...)
+    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080,
+                 middleware=identity, cors=false, accesslog=false, kw...)
 
 Start (non-blocking) an HTTP server for a router and return the server handle
 (`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
 loads config and applies profile conventions; `serve!` is the bare transport
 entrypoint. Remaining `kw` pass through to `HTTP.listen!`.
+
+`middleware` is called once with Servo's HTTP request handler and must return a
+request handler. It can mount a protocol-native handler before Servo routing,
+including handlers that return streaming HTTP response bodies. Servo's CORS and
+access-log middleware wrap the result, so they also cover mounted paths.
 
 Statically compiled (juliac --trim) deployments should skip `serve!` and serve
 a composed handler through HTTP.jl's request-handler path directly — its
@@ -197,8 +203,11 @@ That path never sees the transport peer, so [`Servo.clientip`](@ref) falls
 back to `X-Forwarded-For` alone.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                cors::Bool=false, accesslog::Bool=false, kw...)
-    handler = httphandler(router)
+                middleware=identity, cors::Bool=false, accesslog::Bool=false, kw...)
+    handler = middleware(httphandler(router))
+    applicable(handler, HTTP.Request("GET", "/")) || throw(ArgumentError(
+        "middleware must return a handler callable with an HTTP.Request",
+    ))
     cors && (handler = cors_middleware(handler))
     accesslog && (handler = accesslog_middleware(handler))
 
