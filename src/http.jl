@@ -114,9 +114,16 @@ function httphandler(router::Router)
                 return HTTP.Response(resp.status; headers=resp.headers, body=body)
             return HTTP.Response(resp.status; headers=resp.headers, body=body::Vector{UInt8})
         catch e
-            http_error = _httperror(e)
-            http_error === nothing ||
-                return errorresponse(ep, http_error.status, http_error.message)
+            # Narrow the catch value before reading its fields. A catch value
+            # has type Any, so passing it through a generic error-mapping helper
+            # leaves dynamic dispatch in every compiled HTTP.Request method.
+            # These branches preserve the public policy and keep the transport
+            # statically callable under JuliaC --trim.
+            if e isa HTTPError
+                return errorresponse(ep, e.status, e.message)
+            elseif e isa ArgumentError
+                return errorresponse(ep, 400, e.msg)
+            end
             @error "unhandled exception in endpoint $(ep === nothing ? "<unmatched>" : ep.name)" exception=(e, catch_backtrace())
             return errorresponse(ep, 500, "internal server error")
         end
