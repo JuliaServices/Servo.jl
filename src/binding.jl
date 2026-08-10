@@ -95,17 +95,26 @@ end
 # scoped-value semantics (including propagation to spawned tasks) are
 # unchanged while every call stays statically dispatched.
 # `@nospecialize(value)` prevents the caller from emitting a runtime-
-# specializing dispatch for the `Any`-typed request slot. The insert calls
-# `Base._keyvalueset` directly: the `KeyValue.set` wrappers add a second
-# applicable method at this call type, and the patched-Julia trim toolchain
-# despecializes `_keyvalueset`'s value parameter to match.
-function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
-                   key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
-    val = convert(T, value)
-    storage = parent === nothing ?
-        Base.KeyValue.set(Base.ScopedValues.ScopeStorage, nothing, key, val) :
-        Base._keyvalueset(parent.values, key, val)
-    return Base.ScopedValues.Scope(storage)
+# specializing dispatch for the `Any`-typed request slot. Julia 1.11 uses a
+# different scope-storage implementation, so use its compatible constructor.
+@static if VERSION < v"1.12"
+    function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
+                       key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
+        return Base.ScopedValues.Scope(parent, key, value)
+    end
+else
+    # The insert calls `Base._keyvalueset` directly: the `KeyValue.set`
+    # wrappers add a second applicable method at this call type, and the
+    # patched-Julia trim toolchain despecializes `_keyvalueset`'s value
+    # parameter to match.
+    function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
+                       key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
+        val = convert(T, value)
+        storage = parent === nothing ?
+            Base.KeyValue.set(Base.ScopedValues.ScopeStorage, nothing, key, val) :
+            Base._keyvalueset(parent.values, key, val)
+        return Base.ScopedValues.Scope(storage)
+    end
 end
 
 function requestscope(pr, call::HandlerCall)
