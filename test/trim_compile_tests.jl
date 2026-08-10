@@ -10,6 +10,9 @@ const _TRIM_UPSTREAM_PATTERNS = [
     r"HashArrayMappedTries|ScopedValues|PersistentDict",
     # Base stream callback machinery reachable via the TLS io layer
     r"uv_readcb|LibuvStream|readcb_specialized",
+    # Base's Windows file-stat error path formats a WindowsRawSocket through
+    # the generic show fallback, which is not trim-verifiable on Julia 1.12.
+    r"Base\.Libc\.WindowsRawSocket",
 ]
 
 const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
@@ -198,7 +201,7 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
                 @test !run_timed_out
                 @test run_exit == 0
             else
-                println("[trim] $(trim_errors) known upstream verifier finding(s) (ScopedValues/stream callbacks; see _TRIM_UPSTREAM_PATTERNS) — full trim compilation requires a newer Julia; skipping executable run")
+                println("[trim] $(trim_errors) known upstream verifier finding(s) (see _TRIM_UPSTREAM_PATTERNS) — full trim compilation requires a newer Julia; skipping executable run")
                 @test exit_code != 0
             end
         end
