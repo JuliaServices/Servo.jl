@@ -1,4 +1,4 @@
-# Servo 2.0 design
+# Servo 1.0 design
 
 Servo is an **application driver**: you have a Julia package that does something
 useful (the "domain" layer), and Servo turns it into a running service that
