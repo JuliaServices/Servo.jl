@@ -36,7 +36,8 @@ development; other profiles do not.
 
 Keywords: `router=Servo.ROUTER`, `host="0.0.0.0"`, `port=nothing` (falls back to
 the `port` config key, then 8080), `configdir=nothing`, `configs=Dict()`,
-`setup=Returns(nothing)`, `accesslog=true`, `log=!isinteractive()`.
+`setup=Returns(nothing)`, `middleware=identity`, `accesslog=true`,
+`log=!isinteractive()`.
 
 `setup` runs once after configuration is available and before Servo opens the
 listener. Use it for required, idempotent startup work such as creating database
@@ -45,7 +46,8 @@ tables. If it throws, `run!` stops without starting the server.
 function run!(name::AbstractString="Servo", profile::AbstractString="";
               router::Router=ROUTER, host="0.0.0.0", port::Union{Integer, Nothing}=nothing,
               configdir::Union{AbstractString, Nothing}=nothing, configs=Dict{String, Any}(),
-              setup=Returns(nothing), accesslog::Bool=true, log::Bool=!isinteractive())
+              setup=Returns(nothing), middleware=identity,
+              accesslog::Bool=true, log::Bool=!isinteractive())
     @info "$name init" julia=Base.VERSION threads=Threads.nthreads()
     prof = loadconfig!(; profile, configdir, configs, log)
     # Configuration must be ready before application provisioning runs. The
@@ -58,7 +60,7 @@ function run!(name::AbstractString="Servo", profile::AbstractString="";
         burst=_float(config("public_ratelimit_burst", 20.0)))
     registerbuiltins!(router)
     cors = prof == "local"
-    server = serve!(router; host, port=p, cors, accesslog)
+    server = serve!(router; host, port=p, middleware, cors, accesslog)
     @info "$name listening" profile=prof host port=Servo.port(server) cors endpoints=length(router.endpoints)
     return server
 end

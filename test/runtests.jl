@@ -481,7 +481,20 @@ end
         Servo.Response(200, "$(req.proto_major)|$(Servo.clientip(req))")
     end; auth=Servo.Public())
 
-    server = Servo.serve!(r; host="127.0.0.1", port=0)
+    protocol_middleware = function (handler)
+        return function (request)
+            HTTP.URI(request.target).path == "/events" || return handler(request)
+            return HTTP.sse_stream(200) do stream
+                write(stream, HTTP.SSEEvent("ready"; event="status"))
+            end
+        end
+    end
+    server = Servo.serve!(
+        r;
+        host="127.0.0.1",
+        port=0,
+        middleware=protocol_middleware,
+    )
     try
         port = Servo.port(server)
         base = "http://127.0.0.1:$port"
@@ -555,6 +568,13 @@ end
         # raw handler over real HTTP
         @test String(get("/mirror/x/y").body) == "/mirror/x/y"
 
+        # A mounted protocol can stream an HTTP-native response. Normal paths
+        # continue through Servo routing.
+        resp = get("/events")
+        @test resp.status == 200
+        @test HTTP.header(resp, "Content-Type") == "text/event-stream"
+        @test String(resp.body) == "event: status\ndata: ready\n\n"
+
         # The same server accepts cleartext HTTP/2 prior knowledge. This also
         # verifies that peer-address capture remains available on an h2 stream.
         resp = HTTP.get(base * "/transport"; protocol=:h2, status_exception=false)
@@ -563,6 +583,15 @@ end
     finally
         close(server)
     end
+end
+
+@testset "HTTP middleware validation" begin
+    @test_throws ArgumentError Servo.serve!(
+        Servo.Router();
+        host="127.0.0.1",
+        port=0,
+        middleware=_ -> 42,
+    )
 end
 
 @testset "run! lifecycle & config" begin
