@@ -1,8 +1,8 @@
 # JuliaC --trim=safe workload for Servo's core machinery: endpoint declaration
 # (macros + validation), routing, the type-erased handler path (HandlerFn),
 # statically-bound argument extraction/coercion, auth, public rate limiting,
-# formats (TextFormat + the JSON extension), and Figgy-backed config loading —
-# exercised over a minimal non-HTTP transport.
+# formats (TextFormat + the JSON extension), the concrete HTTP transport, and
+# Figgy-backed config loading.
 #
 # The app is built at *runtime* (from main), the required pattern for endpoints:
 # their type-erased handlers capture function pointers that would go stale if
@@ -15,7 +15,7 @@
 # trim-verifiable. Typed `JSON.parse` materialization is likewise a known
 # JSON.jl gap, so the JSON format is exercised on the write side (TextFormat
 # covers body binding).
-using Servo, JSON
+using Servo, HTTP, JSON
 
 struct TrimRequest
     query::Vector{Pair{String, String}}
@@ -92,6 +92,15 @@ function _buildapp()
     Servo.@GET r "/pub" public format=Servo.TextFormat() function pub()
         "ok"
     end
+    Servo.@GET r "/explicit-error" public format=Servo.TextFormat() function expliciterror()
+        throw(Servo.HTTPError(422, "custom response"))
+    end
+    Servo.@POST r "/argument-error" public format=Servo.TextFormat() function argumenterror(msg::String)
+        throw(ArgumentError("invalid $msg"))
+    end
+    Servo.@GET r "/internal-error" public format=Servo.TextFormat() function internalerror()
+        error("private failure")
+    end
     Servo.@GET r "/docs/{page...}" public format=Servo.TextFormat() function docpage(page::String)
         "doc:$page"
     end
@@ -117,7 +126,7 @@ function _trim_routing(r::Servo.Router)::Nothing
     _trim_assert(pp[:id] == "42", "path param captured")
     _trim_assert(Servo.matchroute(r, "PUT", "/items/42") === :method_not_allowed, "405")
     _trim_assert(Servo.matchroute(r, "GET", "/nope") === nothing, "404")
-    _trim_assert(length(r.endpoints) == 9, "route table size")
+    _trim_assert(length(r.endpoints) == 12, "route table size")
 
     # catch-all: binds the slash-joined remainder, needs at least one segment
     ep, pp = _getep(r, "GET", "/docs/guide/intro")
@@ -130,6 +139,32 @@ function _trim_routing(r::Servo.Router)::Nothing
     ep, pp = _getep(r, "GET", "/mirror/9/x/y")
     resp = Servo.handle(ep, pp, TrimRequest())
     _trim_assert(resp.status == 200 && resp.body == "mirror:9", "raw handler")
+    return nothing
+end
+
+function _trim_http_transport(r::Servo.Router)::Nothing
+    handler = Servo.httphandler(r)
+
+    # EmptyBody requests cover routing failures plus explicit, default, and
+    # sanitized endpoint errors through the real HTTP transport.
+    response = handler(HTTP.Request("GET", "/missing"))
+    _trim_assert(response.status == 404, "HTTP transport 404 status")
+    _trim_assert(String(response.body) == "no route for GET /missing", "HTTP transport 404 body")
+
+    response = handler(HTTP.Request("GET", "/explicit-error"))
+    _trim_assert(response.status == 422, "HTTP transport explicit error status")
+    _trim_assert(String(response.body) == "custom response", "HTTP transport explicit error body")
+
+    response = handler(HTTP.Request("GET", "/internal-error"))
+    _trim_assert(response.status == 500, "HTTP transport internal error status")
+    _trim_assert(String(response.body) == "internal server error", "HTTP transport hides internal errors")
+
+    # A body-bearing request produces a separate HTTP.Request specialization.
+    # It must retain the same ArgumentError-to-400 policy without dynamic
+    # dispatch from the handler's catch block.
+    response = handler(HTTP.Request("POST", "/argument-error", HTTP.Headers(), "request"))
+    _trim_assert(response.status == 400, "HTTP body transport argument error status")
+    _trim_assert(String(response.body) == "invalid request", "HTTP body transport argument error body")
     return nothing
 end
 
@@ -210,14 +245,6 @@ function _trim_auth_and_ratelimit(r::Servo.Router)::Nothing
 end
 
 function _trim_validation()::Nothing
-    default_error = Servo._httperror(ArgumentError("invalid input"))
-    _trim_assert(default_error !== nothing, "ArgumentError maps to HTTPError")
-    _trim_assert(default_error.status == 400, "ArgumentError maps to 400")
-    _trim_assert(default_error.message == "invalid input", "ArgumentError message")
-    explicit_error = Servo.HTTPError(422, "custom response")
-    _trim_assert(Servo._httperror(explicit_error) === explicit_error, "HTTPError preserved")
-    _trim_assert(Servo._httperror(ErrorException("internal")) === nothing, "unknown error stays internal")
-
     # explicit stub binders: hand-constructed endpoints default to the
     # reflective GenericBinder, which is deliberately not trim-verifiable
     stub = Servo.Binder((fmt, pp, q, b) -> nothing)
@@ -272,6 +299,7 @@ function run_servo_trim_sample()::Nothing
     _trim_binding(r)
     _trim_json(r)
     _trim_auth_and_ratelimit(r)
+    _trim_http_transport(r)
     _trim_validation()
     _trim_config()
     return nothing

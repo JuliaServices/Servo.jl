@@ -35,12 +35,13 @@ function _setup_trim_env()
     env_path = mktempdir()
     julia = joinpath(Sys.BINDIR, Base.julia_exename())
     setup_script = joinpath(env_path, "setup.jl")
-    # the workload exercises the JSON format extension, so JSON joins JuliaC in
-    # the temp project (HTTP stays out: the trim workload covers core Servo only)
+    # The workload imports HTTP to construct concrete requests and JSON to load
+    # Servo's format extension. Both must be direct dependencies of this
+    # temporary project because the workload is its top-level entry point.
     write(setup_script, """
     import Pkg
     Pkg.develop(path=$(repr(servo_path)))
-    Pkg.add(["JuliaC", "JSON"])
+    Pkg.add(["JuliaC", "HTTP", "JSON"])
     """)
     println("[trim] setting up temp environment with JuliaC...")
     flush(stdout)
