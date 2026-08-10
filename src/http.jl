@@ -114,7 +114,9 @@ function httphandler(router::Router)
                 return HTTP.Response(resp.status; headers=resp.headers, body=body)
             return HTTP.Response(resp.status; headers=resp.headers, body=body::Vector{UInt8})
         catch e
-            e isa HTTPError && return errorresponse(ep, e.status, e.message)
+            http_error = _httperror(e)
+            http_error === nothing ||
+                return errorresponse(ep, http_error.status, http_error.message)
             @error "unhandled exception in endpoint $(ep === nothing ? "<unmatched>" : ep.name)" exception=(e, catch_backtrace())
             return errorresponse(ep, 500, "internal server error")
         end

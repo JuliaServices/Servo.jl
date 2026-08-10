@@ -210,6 +210,14 @@ function _trim_auth_and_ratelimit(r::Servo.Router)::Nothing
 end
 
 function _trim_validation()::Nothing
+    default_error = Servo._httperror(ArgumentError("invalid input"))
+    _trim_assert(default_error !== nothing, "ArgumentError maps to HTTPError")
+    _trim_assert(default_error.status == 400, "ArgumentError maps to 400")
+    _trim_assert(default_error.message == "invalid input", "ArgumentError message")
+    explicit_error = Servo.HTTPError(422, "custom response")
+    _trim_assert(Servo._httperror(explicit_error) === explicit_error, "HTTPError preserved")
+    _trim_assert(Servo._httperror(ErrorException("internal")) === nothing, "unknown error stays internal")
+
     # explicit stub binders: hand-constructed endpoints default to the
     # reflective GenericBinder, which is deliberately not trim-verifiable
     stub = Servo.Binder((fmt, pp, q, b) -> nothing)

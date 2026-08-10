@@ -457,6 +457,17 @@ end
     Servo.@GET r "/boom" public function boom()
         error("kaboom")
     end
+    Servo.@GET r "/invalid" public function invalid()
+        throw(ArgumentError("invalid endpoint argument"))
+    end
+    Servo.@GET r "/invalid-override" public function invalidoverride()
+        try
+            throw(ArgumentError("invalid endpoint argument"))
+        catch error
+            error isa ArgumentError || rethrow()
+            throw(Servo.HTTPError(422, "custom validation response"))
+        end
+    end
     Servo.@QUERY r "/find" public function findwidget(w::Widget)
         (; found = w.id, n = length(w.tags))
     end
@@ -518,6 +529,18 @@ end
         @test resp.status == 500
         @test JSON.parse(String(resp.body)).error.message == "internal server error"
         @test !occursin("kaboom", String(resp.body))
+
+        # ArgumentError is invalid client input by default. An endpoint can
+        # still catch it and throw an explicit HTTPError to replace the policy.
+        resp = get("/invalid")
+        @test resp.status == 400
+        err = JSON.parse(String(resp.body)).error
+        @test err.code == 400 && err.message == "invalid endpoint argument"
+
+        resp = get("/invalid-override")
+        @test resp.status == 422
+        err = JSON.parse(String(resp.body)).error
+        @test err.code == 422 && err.message == "custom validation response"
 
         # the QUERY method over real HTTP, with a JSON body
         resp = HTTP.request("QUERY", base * "/find"; body=JSON.json(Widget(3, ["q"])), status_exception=false)

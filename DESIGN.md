@@ -125,8 +125,10 @@ A handler may return:
   custom content types) — non-trivial endpoints no longer need to abandon the
   macros (the Roam limitation);
 - or throw `Servo.HTTPError(status, msg)` (helpers: `badrequest`, `unauthorized`,
-  `forbidden`, `notfound`). Anything else thrown logs the backtrace and returns a
-  sanitized 500.
+  `forbidden`, `notfound`). An uncaught `ArgumentError` is a 400 by default, so
+  domain validation can stay independent of Servo. An endpoint can catch it and
+  throw an explicit `HTTPError` to replace that policy. Any other exception logs
+  the backtrace and returns a sanitized 500.
 
 Errors serialize into a stable envelope with the endpoint's format:
 `{"error": {"message": ..., "code": ...}}`.
