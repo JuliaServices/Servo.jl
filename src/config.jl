@@ -22,6 +22,20 @@ function config(key::AbstractString, default=nothing)
     return val === nothing ? default : val
 end
 
+"""
+    Servo.config(key, default::String) -> String
+
+Typed lookup: returns the configured `String`, the default when the key is
+absent, and throws `ArgumentError` when the key holds a non-string value.
+Keeps configuration reads statically typed for juliac --trim consumers.
+"""
+function config(key::AbstractString, default::String)
+    val = config(key, nothing)
+    val === nothing && return default
+    val isa String || throw(ArgumentError("config key \"$key\" holds a $(typeof(val)), expected a String"))
+    return val
+end
+
 """current config profile ("local" unless configured otherwise)"""
 profile() = config("profile", "local")::String
 
