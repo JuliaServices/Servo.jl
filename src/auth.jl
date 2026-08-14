@@ -60,11 +60,16 @@ Validate a bearer token and return the principal that handlers will read with
 [`Servo.principal`](@ref). The fallback invokes `validator(token, request)`.
 Define a more specific method when the validator is a stateful policy object.
 """
-function authenticatebearer(validator, token::AbstractString, request)
+function authenticatebearer(validator, token::AbstractString, @nospecialize(request))
     return validator(token, request)
 end
 
-function authenticate(auth::BearerAuth, request)
+# `@nospecialize(request)`: checkauth dispatches from the type-erased
+# HandlerCall's Any-typed request slot, and a request-specializing
+# MethodInstance turns that call into a runtime dispatch — unresolvable under
+# juliac --trim. One despecialized instance keeps it statically invokable
+# (same seam as `bearertoken`).
+function authenticate(auth::BearerAuth, @nospecialize(request))
     token = bearertoken(request)
     token === nothing && return nothing
     return authenticatebearer(auth.validator, token, request)
