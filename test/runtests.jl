@@ -470,7 +470,17 @@ end
         Servo.Response(200, "$(req.proto_major)|$(Servo.clientip(req))")
     end; auth=Servo.Public())
 
-    server = Servo.serve!(r; host="127.0.0.1", port=0)
+    middleware_paths = String[]
+    middleware = handler -> function(req)
+        path = HTTP.URI(req.target).path
+        push!(middleware_paths, path)
+        path == "/middleware" && return HTTP.Response(202, "handled by middleware")
+        response = handler(req)
+        HTTP.setheader(response, "X-Test-Middleware" => "true")
+        return response
+    end
+
+    server = Servo.serve!(r; host="127.0.0.1", port=0, middleware)
     try
         port = Servo.port(server)
         base = "http://127.0.0.1:$port"
@@ -479,8 +489,14 @@ end
         resp = get("/hello/world")
         @test resp.status == 200
         @test HTTP.header(resp, "Content-Type") == "application/json; charset=utf-8"
+        @test HTTP.header(resp, "X-Test-Middleware") == "true"
         @test JSON.parse(String(resp.body)).greeting == "hello world"
         @test JSON.parse(String(get("/hello/world?excited=true").body)).greeting == "HELLO WORLD!"
+
+        resp = get("/middleware")
+        @test resp.status == 202
+        @test String(resp.body) == "handled by middleware"
+        @test "/middleware" in middleware_paths
 
         # query param coercion failure -> 400 with the JSON error envelope
         resp = get("/hello/world?excited=maybe")
@@ -570,9 +586,12 @@ end
         setup_greeting[] = Servo.config("greeting")
         return nothing
     end
+    run_middleware = handler -> req ->
+        HTTP.URI(req.target).path == "/run-middleware" ?
+            HTTP.Response(202, "run middleware") : handler(req)
     server = Servo.run!("TestApp", "local"; router=r, host="127.0.0.1", port=0,
                         configdir, configs=Dict("version" => "1.2.3"), setup,
-                        accesslog=false, log=false)
+                        middleware=run_middleware, accesslog=false, log=false)
     try
         port = Servo.port(server)
         base = "http://127.0.0.1:$port"
@@ -588,6 +607,10 @@ end
         @test Servo.config("apikey") == "shh"
         @test Servo.config("missing", "fallback") == "fallback"
         @test JSON.parse(String(HTTP.get(base * "/greet").body)).msg == "hello local"
+        resp = HTTP.get(base * "/run-middleware"; status_exception=false)
+        @test resp.status == 202
+        @test String(resp.body) == "run middleware"
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
 
         # builtin endpoints
         @test String(HTTP.get(base * "/status").body) == "ok"

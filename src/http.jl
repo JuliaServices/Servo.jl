@@ -173,12 +173,16 @@ function accesslog_middleware(handler)
 end
 
 """
-    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080, cors=false, accesslog=false, kw...)
+    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080,
+                 cors=false, accesslog=false, middleware=identity, kw...)
 
 Start (non-blocking) an HTTP server for a router and return the server handle
 (`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
 loads config and applies profile conventions; `serve!` is the bare transport
 entrypoint. Remaining `kw` pass through to `HTTP.listen!`.
+
+`middleware` is a function from handler to handler. It wraps the router handler
+inside Servo's CORS and access-log middleware.
 
 Statically compiled (juliac --trim) deployments should skip `serve!` and serve
 a composed handler through HTTP.jl's request-handler path directly — its

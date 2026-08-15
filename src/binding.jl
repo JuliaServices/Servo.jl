@@ -96,15 +96,23 @@ end
 # unchanged while every call stays statically dispatched.
 # `@nospecialize(value)` prevents the caller from emitting a runtime-
 # specializing dispatch for the `Any`-typed request slot. The insert calls
-# `Base._keyvalueset` directly: the `KeyValue.set` wrappers add a second
-# applicable method at this call type, and the patched-Julia trim toolchain
-# despecializes `_keyvalueset`'s value parameter to match.
+# `Base._keyvalueset` directly on Julia versions that provide it: the
+# `KeyValue.set` wrappers add a second applicable method at this call type, and
+# the patched-Julia trim toolchain despecializes `_keyvalueset`'s value
+# parameter to match. Julia 1.11 has no `_keyvalueset`, so use its equivalent
+# `KeyValue.set` implementation there.
+@static if isdefined(Base, :_keyvalueset)
+    scopevalueset(storage, key, value) = Base._keyvalueset(storage, key, value)
+else
+    scopevalueset(storage, key, value) = Base.KeyValue.set(storage, key, value)
+end
+
 function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
                    key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
     val = convert(T, value)
     storage = parent === nothing ?
         Base.KeyValue.set(Base.ScopedValues.ScopeStorage, nothing, key, val) :
-        Base._keyvalueset(parent.values, key, val)
+        scopevalueset(parent.values, key, val)
     return Base.ScopedValues.Scope(storage)
 end
 
