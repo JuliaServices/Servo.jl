@@ -192,8 +192,13 @@ That path never sees the transport peer, so [`Servo.clientip`](@ref) falls
 back to `X-Forwarded-For` alone.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                cors::Bool=false, accesslog::Bool=false, kw...)
-    handler = httphandler(router)
+                cors::Bool=false, accesslog::Bool=false, middleware=identity, kw...)
+    # `middleware` wraps the router handler itself — innermost in the
+    # pipeline, so cors/accesslog wrappers run first — for protocols that
+    # intercept raw requests before routing (an MCP endpoint, for example).
+    # The `identity` default keeps the composition concrete for statically
+    # compiled servers.
+    handler = middleware(httphandler(router))
     cors && (handler = cors_middleware(handler))
     accesslog && (handler = accesslog_middleware(handler))
 
