@@ -86,51 +86,10 @@ struct RequestHandler{B, A <: AuthScheme, S <: Format} <: Function
     format::S
 end
 
-# ── static request-scope construction ───────────────────────────────────────
-# `@with PRINCIPAL => pr REQUEST => call.req ...` builds each entry with
-# `=>`, and `Pair(a, b)` computes `typeof(b)` at runtime — for the `Any`-typed
-# request slot that is a dynamic call the trim verifier cannot resolve. These
-# helpers build the same `Scope` through `KeyValue.set` (no `Pair` at all) and
-# enter it with the same lowered `:tryfinally` scope form the macro uses, so
-# scoped-value semantics (including propagation to spawned tasks) are
-# unchanged while every call stays statically dispatched.
-# `@nospecialize(value)` prevents the caller from emitting a runtime-
-# specializing dispatch for the `Any`-typed request slot. Julia 1.11 uses a
-# different scope-storage implementation, so use its compatible constructor.
-@static if VERSION < v"1.12"
-    function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
-                       key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
-        return Base.ScopedValues.Scope(parent, key, value)
-    end
-else
-    # The insert calls `Base._keyvalueset` directly: the `KeyValue.set`
-    # wrappers add a second applicable method at this call type, and the
-    # patched-Julia trim toolchain despecializes `_keyvalueset`'s value
-    # parameter to match.
-    function scopewith(parent::Union{Nothing, Base.ScopedValues.Scope},
-                       key::Base.ScopedValues.ScopedValue{T}, @nospecialize(value)) where {T}
-        val = convert(T, value)
-        storage = parent === nothing ?
-            Base.KeyValue.set(Base.ScopedValues.ScopeStorage, nothing, key, val) :
-            Base._keyvalueset(parent.values, key, val)
-        return Base.ScopedValues.Scope(storage)
-    end
-end
-
-function requestscope(pr, call::HandlerCall)
-    scope = scopewith(Core.current_scope()::Union{Nothing, Base.ScopedValues.Scope}, PRINCIPAL, pr)
-    scope = scopewith(scope, REQUEST, call.req)
-    return scopewith(scope, PATHPARAMS, call.pathparams)
-end
-
-macro inscope(scope, body)
-    return Expr(:tryfinally, esc(body), nothing, esc(scope))
-end
-
 function (h::RequestHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    scope = requestscope(pr, call)
-    return @inscope scope begin
+    context = RequestContext(pr, call.req, call.pathparams)
+    return @with REQUEST_CONTEXT => context begin
         toresponse(h.format, h.binder(h.format, call.pathparams, call.query, call.body))
     end
 end
@@ -151,8 +110,8 @@ end
 
 function (h::RawHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    scope = requestscope(pr, call)
-    return @inscope scope begin
+    context = RequestContext(pr, call.req, call.pathparams)
+    return @with REQUEST_CONTEXT => context begin
         toresponse(h.format, h.f.f(call.req))
     end
 end

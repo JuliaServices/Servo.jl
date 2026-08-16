@@ -60,11 +60,16 @@ Validate a bearer token and return the principal that handlers will read with
 [`Servo.principal`](@ref). The fallback invokes `validator(token, request)`.
 Define a more specific method when the validator is a stateful policy object.
 """
-function authenticatebearer(validator, token::AbstractString, request)
+function authenticatebearer(validator, token::AbstractString, @nospecialize(request))
     return validator(token, request)
 end
 
-function authenticate(auth::BearerAuth, request)
+# `@nospecialize(request)`: checkauth dispatches from the type-erased
+# HandlerCall's Any-typed request slot, and a request-specializing
+# MethodInstance turns that call into a runtime dispatch — unresolvable under
+# juliac --trim. One despecialized instance keeps it statically invokable
+# (same seam as `bearertoken`).
+function authenticate(auth::BearerAuth, @nospecialize(request))
     token = bearertoken(request)
     token === nothing && return nothing
     return authenticatebearer(auth.validator, token, request)
@@ -81,12 +86,15 @@ default per-client rate limiting when the app is started via `Servo.run!`.
 struct Public <: AuthScheme end
 
 # Ambient per-request state: ScopedValues, so the context propagates into tasks
-# spawned inside a handler. (Note: Base's ScopedValues scope storage is not yet
-# juliac --trim=safe verifiable — a known upstream limitation the trim test
-# harness allowlists until a Julia release fixes it.)
-const PRINCIPAL = ScopedValue{Any}(nothing)
-const REQUEST = ScopedValue{Any}(nothing)
-const PATHPARAMS = ScopedValue{Dict{Symbol, String}}(Dict{Symbol, String}())
+# spawned inside a handler. ScopedValues.jl supplies the Julia 1.10 backport and
+# forwards to Base.ScopedValues on Julia 1.11 and later.
+struct RequestContext
+    principal::Any
+    request::Any
+    pathparams::Dict{Symbol, String}
+end
+
+const REQUEST_CONTEXT = ScopedValue(RequestContext(nothing, nothing, Dict{Symbol, String}()))
 
 """
     Servo.principal()
@@ -94,7 +102,7 @@ const PATHPARAMS = ScopedValue{Dict{Symbol, String}}(Dict{Symbol, String}())
 The principal returned by the current endpoint's `authenticate`, or `nothing` on
 public endpoints. Only meaningful inside a handler call.
 """
-principal() = PRINCIPAL[]
+principal() = REQUEST_CONTEXT[].principal
 
 """
     Servo.request()
@@ -102,7 +110,7 @@ principal() = PRINCIPAL[]
 The raw transport request currently being handled (e.g. an `HTTP.Request`), or
 `nothing` outside a handler call.
 """
-request() = REQUEST[]
+request() = REQUEST_CONTEXT[].request
 
 """
     Servo.pathparams() -> Dict{Symbol, String}
@@ -112,4 +120,4 @@ appeared in the request path. Bound endpoints receive these as typed function
 arguments already; this accessor exists for raw handlers (registered via
 `register!(router, method, path, handler; ...)`), where no binding happens.
 """
-pathparams() = PATHPARAMS[]
+pathparams() = REQUEST_CONTEXT[].pathparams

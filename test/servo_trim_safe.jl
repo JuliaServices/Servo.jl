@@ -11,10 +11,10 @@
 # endpoint references.
 #
 # Known upstream trim limitations (allowlisted by the harness, see
-# trim_compile_tests.jl): Base.ScopedValues scope storage is not yet
-# trim-verifiable. Typed `JSON.parse` materialization is likewise a known
-# JSON.jl gap, so the JSON format is exercised on the write side (TextFormat
-# covers body binding).
+# trim_compile_tests.jl): ScopedValues.jl forwards to Base.ScopedValues on
+# current Julia, whose scope storage is not yet trim-verifiable. Typed
+# `JSON.parse` materialization is likewise a known JSON.jl gap, so the JSON
+# format is exercised on the write side (TextFormat covers body binding).
 using Servo, HTTP, JSON
 
 struct TrimRequest
@@ -87,7 +87,7 @@ function _buildapp()
         (; ok = !dry, id, n = 2)
     end
     Servo.@GET r "/secret" TrimAuth("open-sesame") format=Servo.TextFormat() function secret()
-        Servo.principal() isa String ? "granted" : "no-principal"
+        Servo.principal() isa String && Servo.request() isa TrimRequest ? "granted" : "no-context"
     end
     Servo.@GET r "/pub" public format=Servo.TextFormat() function pub()
         "ok"
@@ -107,6 +107,7 @@ function _buildapp()
     # typing the request argument is what keeps the raw-handler call statically
     # resolvable under trim (untyped handlers work, at the cost of one dynamic call)
     Servo.register!(r, :GET, "/mirror/{id}/**", function mirror(req::TrimRequest)
+        Servo.request() === req || return Servo.Response(500, "wrong request")
         Servo.Response(200, "mirror:" * Servo.pathparams()[:id])
     end; auth=Servo.Public())
     return r
@@ -139,6 +140,8 @@ function _trim_routing(r::Servo.Router)::Nothing
     ep, pp = _getep(r, "GET", "/mirror/9/x/y")
     resp = Servo.handle(ep, pp, TrimRequest())
     _trim_assert(resp.status == 200 && resp.body == "mirror:9", "raw handler")
+    _trim_assert(Servo.request() === nothing, "raw request scope cleared")
+    _trim_assert(isempty(Servo.pathparams()), "raw path scope cleared")
     return nothing
 end
 
@@ -219,8 +222,10 @@ end
 function _trim_auth_and_ratelimit(r::Servo.Router)::Nothing
     ep, _ = _getep(r, "GET", "/secret")
     resp = Servo.handle(ep, NOPARAMS, TrimRequest(; query = ["key" => "open-sesame"]))
-    _trim_assert(resp.body == "granted", "auth principal")
+    _trim_assert(resp.body == "granted", "scoped principal and request")
     _trim_assert(Servo.principal() === nothing, "principal cleared outside request")
+    _trim_assert(Servo.request() === nothing, "request cleared outside request")
+    _trim_assert(isempty(Servo.pathparams()), "path params cleared outside request")
     _expect_httperror(401, "bad credentials") do
         Servo.handle(ep, NOPARAMS, TrimRequest(; query = ["key" => "wrong"]))
     end

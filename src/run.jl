@@ -36,8 +36,8 @@ development; other profiles do not.
 
 Keywords: `router=Servo.ROUTER`, `host="0.0.0.0"`, `port=nothing` (falls back to
 the `port` config key, then 8080), `configdir=nothing`, `configs=Dict()`,
-`setup=Returns(nothing)`, `middleware=identity`, `accesslog=true`,
-`log=!isinteractive()`.
+`setup=Returns(nothing)`, `middleware=identity` (forwarded to [`serve!`](@ref)),
+`accesslog=true`, `log=!isinteractive()`.
 
 `setup` runs once after configuration is available and before Servo opens the
 listener. Use it for required, idempotent startup work such as creating database
@@ -86,13 +86,19 @@ function run(args...; kw...)
 end
 
 function registerbuiltins!(router::Router)
+    # Registered through the same macro machinery as application endpoints so
+    # the builtins get statically-typed binders: the closure-target Endpoint
+    # path binds reflectively, which a juliac --trim=safe build cannot verify,
+    # and trim apps previously had to hand-register static equivalents.
     if !(matchroute(router, :GET, ["status"]) isa Tuple)
-        register!(router, Endpoint(; name="status", method=:GET, path="/status",
-            target=() -> "ok", auth=Public(), format=TextFormat()))
+        @GET router "/status" public format=TextFormat() function status()
+            return "ok"
+        end
     end
     if !(matchroute(router, :GET, ["version"]) isa Tuple)
-        register!(router, Endpoint(; name="version", method=:GET, path="/version",
-            target=() -> string(config("version", "unknown")), auth=Public(), format=TextFormat()))
+        @GET router "/version" public format=TextFormat() function version()
+            return string(config("version", "unknown"))
+        end
     end
     return router
 end

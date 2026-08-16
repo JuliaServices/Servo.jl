@@ -1,0 +1,9 @@
+[deps]
+AbstractStores = "b8592f88-5fd7-4e10-8c52-04e8e19aea3c"
+JWTs = "d850fbd6-035d-5a70-a269-1ca2e636ac6c"
+Servo = "169596a4-850b-412e-9996-453439081821"
+
+[sources]
+AbstractStores = {rev = "trim-despecialize-put", url = "https://github.com/JuliaServices/AbstractStores.jl"}
+JWTs = {rev = "trim-typed-jwks", url = "https://github.com/JuliaWeb/JWTs.jl"}
+Servo = {rev = "rewrite", url = "https://github.com/JuliaServices/Servo.jl"}

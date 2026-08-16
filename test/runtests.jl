@@ -342,19 +342,29 @@ end
     end
     e = @test_throws Servo.HTTPError Servo.handle(ep, NOPARAMS, TestRequest())
     @test e.value.status == 418
+    @test Servo.principal() === nothing
+    @test Servo.request() === nothing
+    @test isempty(Servo.pathparams())
 end
 
 @testset "auth over the mock transport" begin
     r = Servo.Router()
     ep = Servo.@GET r "/whoami" KeyAuth("sekrit") format=Servo.TextFormat() function whoami()
-        "principal=$(Servo.principal()) request=$(typeof(Servo.request()))"
+        scoped = fetch(@async (
+            principal = Servo.principal(),
+            request_type = nameof(typeof(Servo.request())),
+            pathparams = copy(Servo.pathparams()),
+        ))
+        "principal=$(scoped.principal) request=$(scoped.request_type) pathparams=$(length(scoped.pathparams))"
     end
     @test ep.auth == KeyAuth("sekrit")
 
     resp = Servo.handle(ep, NOPARAMS, TestRequest(; query=["key" => "sekrit"]))
-    @test String(resp.body) == "principal=user-1 request=TestRequest"
+    @test String(resp.body) == "principal=user-1 request=TestRequest pathparams=0"
     # outside a request, the scoped values are back to nothing
-    @test Servo.principal() === nothing && Servo.request() === nothing
+    @test Servo.principal() === nothing
+    @test Servo.request() === nothing
+    @test isempty(Servo.pathparams())
 
     e = @test_throws Servo.HTTPError Servo.handle(ep, NOPARAMS, TestRequest(; query=["key" => "wrong"]))
     @test e.value.status == 401
@@ -481,19 +491,26 @@ end
         Servo.Response(200, "$(req.proto_major)|$(Servo.clientip(req))")
     end; auth=Servo.Public())
 
-    protocol_middleware = function (handler)
-        return function (request)
-            HTTP.URI(request.target).path == "/events" || return handler(request)
+    middleware_paths = String[]
+    middleware = handler -> function(request)
+        path = HTTP.URI(request.target).path
+        push!(middleware_paths, path)
+        if path == "/events"
             return HTTP.sse_stream(200) do stream
                 write(stream, HTTP.SSEEvent("ready"; event="status"))
             end
+        elseif path == "/middleware"
+            return HTTP.Response(202, "handled by middleware")
         end
+        response = handler(request)
+        HTTP.setheader(response, "X-Test-Middleware" => "true")
+        return response
     end
     server = Servo.serve!(
         r;
         host="127.0.0.1",
         port=0,
-        middleware=protocol_middleware,
+        middleware,
     )
     try
         port = Servo.port(server)
@@ -503,8 +520,14 @@ end
         resp = get("/hello/world")
         @test resp.status == 200
         @test HTTP.header(resp, "Content-Type") == "application/json; charset=utf-8"
+        @test HTTP.header(resp, "X-Test-Middleware") == "true"
         @test JSON.parse(String(resp.body)).greeting == "hello world"
         @test JSON.parse(String(get("/hello/world?excited=true").body)).greeting == "HELLO WORLD!"
+
+        resp = get("/middleware")
+        @test resp.status == 202
+        @test String(resp.body) == "handled by middleware"
+        @test "/middleware" in middleware_paths
 
         # query param coercion failure -> 400 with the JSON error envelope
         resp = get("/hello/world?excited=maybe")
@@ -622,9 +645,12 @@ end
         setup_greeting[] = Servo.config("greeting")
         return nothing
     end
+    run_middleware = handler -> req ->
+        HTTP.URI(req.target).path == "/run-middleware" ?
+            HTTP.Response(202, "run middleware") : handler(req)
     server = Servo.run!("TestApp", "local"; router=r, host="127.0.0.1", port=0,
                         configdir, configs=Dict("version" => "1.2.3"), setup,
-                        accesslog=false, log=false)
+                        middleware=run_middleware, accesslog=false, log=false)
     try
         port = Servo.port(server)
         base = "http://127.0.0.1:$port"
@@ -640,6 +666,10 @@ end
         @test Servo.config("apikey") == "shh"
         @test Servo.config("missing", "fallback") == "fallback"
         @test JSON.parse(String(HTTP.get(base * "/greet").body)).msg == "hello local"
+        resp = HTTP.get(base * "/run-middleware"; status_exception=false)
+        @test resp.status == 202
+        @test String(resp.body) == "run middleware"
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
 
         # builtin endpoints
         @test String(HTTP.get(base * "/status").body) == "ok"
@@ -697,5 +727,8 @@ end
 
 end # @testset "Servo"
 
-include("openapi_tests.jl")
+# OpenAPI 1 requires Julia 1.11. CI disables only this optional extension on 1.10.
+if get(ENV, "SERVO_TEST_OPENAPI", "true") == "true"
+    include("openapi_tests.jl")
+end
 include("trim_compile_tests.jl")
