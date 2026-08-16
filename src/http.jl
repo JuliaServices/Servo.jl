@@ -173,12 +173,16 @@ function accesslog_middleware(handler)
 end
 
 """
-    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080, cors=false, accesslog=false, kw...)
+    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080,
+                 cors=false, accesslog=false, middleware=identity, kw...)
 
 Start (non-blocking) an HTTP server for a router and return the server handle
 (`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
 loads config and applies profile conventions; `serve!` is the bare transport
 entrypoint. Remaining `kw` pass through to `HTTP.listen!`.
+
+`middleware` is a function from handler to handler. It wraps the router handler
+inside Servo's CORS and access-log middleware.
 
 Statically compiled (juliac --trim) deployments should skip `serve!` and serve
 a composed handler through HTTP.jl's request-handler path directly — its
@@ -192,8 +196,13 @@ That path never sees the transport peer, so [`Servo.clientip`](@ref) falls
 back to `X-Forwarded-For` alone.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                cors::Bool=false, accesslog::Bool=false, kw...)
-    handler = httphandler(router)
+                cors::Bool=false, accesslog::Bool=false, middleware=identity, kw...)
+    # `middleware` wraps the router handler itself — innermost in the
+    # pipeline, so cors/accesslog wrappers run first — for protocols that
+    # intercept raw requests before routing (an MCP endpoint, for example).
+    # The `identity` default keeps the composition concrete for statically
+    # compiled servers.
+    handler = middleware(httphandler(router))
     cors && (handler = cors_middleware(handler))
     accesslog && (handler = accesslog_middleware(handler))
 

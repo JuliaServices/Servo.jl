@@ -1,7 +1,7 @@
 module Servo
 
 using Logging
-using Base.ScopedValues
+using ScopedValues: ScopedValue, @with
 import Figgy, HTTP
 
 # core interface: these files only use Base
