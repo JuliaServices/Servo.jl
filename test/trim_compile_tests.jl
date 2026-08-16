@@ -5,8 +5,8 @@ using Test
 # on every supported Julia, and automatically resumes full binary-run
 # verification on the first Julia where upstream is clean.
 const _TRIM_UPSTREAM_PATTERNS = [
-    # Base.ScopedValues scope storage (a HAMT keyed by an abstract type): not
-    # yet trim-verifiable (still fails on 1.13.0-rc1 and 1.14.0-DEV as of 2026-07)
+    # ScopedValues.jl forwards to Base.ScopedValues on current Julia. Its scope
+    # storage (a HAMT keyed by an abstract type) is not yet trim-verifiable.
     r"HashArrayMappedTries|ScopedValues|PersistentDict",
     # Base stream callback machinery reachable via the TLS io layer
     r"uv_readcb|LibuvStream|readcb_specialized",

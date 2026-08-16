@@ -342,19 +342,29 @@ end
     end
     e = @test_throws Servo.HTTPError Servo.handle(ep, NOPARAMS, TestRequest())
     @test e.value.status == 418
+    @test Servo.principal() === nothing
+    @test Servo.request() === nothing
+    @test isempty(Servo.pathparams())
 end
 
 @testset "auth over the mock transport" begin
     r = Servo.Router()
     ep = Servo.@GET r "/whoami" KeyAuth("sekrit") format=Servo.TextFormat() function whoami()
-        "principal=$(Servo.principal()) request=$(typeof(Servo.request()))"
+        scoped = fetch(@async (
+            principal = Servo.principal(),
+            request_type = nameof(typeof(Servo.request())),
+            pathparams = copy(Servo.pathparams()),
+        ))
+        "principal=$(scoped.principal) request=$(scoped.request_type) pathparams=$(length(scoped.pathparams))"
     end
     @test ep.auth == KeyAuth("sekrit")
 
     resp = Servo.handle(ep, NOPARAMS, TestRequest(; query=["key" => "sekrit"]))
-    @test String(resp.body) == "principal=user-1 request=TestRequest"
+    @test String(resp.body) == "principal=user-1 request=TestRequest pathparams=0"
     # outside a request, the scoped values are back to nothing
-    @test Servo.principal() === nothing && Servo.request() === nothing
+    @test Servo.principal() === nothing
+    @test Servo.request() === nothing
+    @test isempty(Servo.pathparams())
 
     e = @test_throws Servo.HTTPError Servo.handle(ep, NOPARAMS, TestRequest(; query=["key" => "wrong"]))
     @test e.value.status == 401
@@ -668,5 +678,8 @@ end
 
 end # @testset "Servo"
 
-include("openapi_tests.jl")
+# OpenAPI 1 requires Julia 1.11. CI disables only this optional extension on 1.10.
+if get(ENV, "SERVO_TEST_OPENAPI", "true") == "true"
+    include("openapi_tests.jl")
+end
 include("trim_compile_tests.jl")
