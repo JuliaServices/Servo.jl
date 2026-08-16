@@ -263,8 +263,8 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
 - The *principal* is whatever `authenticate` returns — a user id, JWT claims, a
   rich context struct. Handlers read it with `Servo.principal()` (and the raw
   request with `Servo.request()`) — `ScopedValue`s, so the context propagates
-  into tasks spawned inside a handler. (Base's ScopedValues scope storage is not
-  yet trim-verifiable — a known upstream gap the trim harness allowlists.)
+  into tasks spawned inside a handler. Servo uses ScopedValues.jl directly; it
+  supplies Julia 1.10 support and forwards to Base.ScopedValues on Julia 1.11+.
 - `Public` endpoints skip authentication but get the default **rate limiter**
   installed by `run!`: a token bucket keyed by (endpoint, client IP), configured
   via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20).
@@ -359,8 +359,8 @@ be zero on every supported Julia**, while findings matching known upstream gaps
 full compile-and-run verification on the first Julia where upstream is clean.
 Current upstream status (2026-07):
 
-- **Base.ScopedValues** scope storage (a HAMT keyed by an abstract type) is not
-  yet trim-verifiable — still fails on 1.13.0-rc1 and 1.14.0-DEV.
+- **ScopedValues** forwards to Base.ScopedValues on current Julia, whose scope
+  storage (a HAMT keyed by an abstract type) is not yet trim-verifiable.
 - **Typed `JSON.parse` materialization** is a known JSON.jl gap (see JSON's own
   trim entrypoints test); the workload covers `JSON.json` writing and verifies
   Servo's body-binding path via `TextFormat`.
