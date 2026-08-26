@@ -8,7 +8,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [sources]
-OpenAPI = {url = "https://github.com/quinnj/OpenAPI.jl.git", rev = "codex/production-rewrite"}
+OpenAPI = {url = "https://github.com/quinnj/OpenAPI.jl.git", rev = "8124eec3bc88f31f075821fa6a424bb3648828fe"}
 
 [compat]
 HTTP = "2"
