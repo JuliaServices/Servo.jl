@@ -136,12 +136,15 @@ function matchsegments(pattern::Vector{Segment}, segs::AbstractVector{<:Abstract
     else
         length(segs) == n || return nothing
     end
+    # Reject unmatched literals before allocating captured parameters.
+    for i in 1:n
+        p = pattern[i]
+        p.kind === :literal && p.text != segs[i] && return nothing
+    end
     params = Dict{Symbol, String}()
     for i in 1:n
         p = pattern[i]
-        if p.kind === :literal
-            p.text == segs[i] || return nothing
-        elseif p.kind === :capture
+        if p.kind === :capture
             params[p.sym] = String(segs[i])
         elseif p.kind === :catchall
             isempty(p.text) || (params[p.sym] = join(view(segs, i:length(segs)), '/'))
