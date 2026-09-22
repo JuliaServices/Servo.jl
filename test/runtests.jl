@@ -284,6 +284,49 @@ end
     end
 end
 
+@testset "raw handler bodies" begin
+    router = Servo.Router()
+    ep = Servo.register!(router, :POST, "/raw-body",
+        req -> Servo.Response(200, string(length(req.body))); auth=Servo.Public())
+    params = Dict{Symbol, String}()
+    for n in (1024, 1 << 20)
+        data = fill(0x61, n)
+        req = HTTP.Request("POST", "/raw-body", [], data)
+        body = req.body
+        response = Servo.handle(ep, params, req)
+        @test response.body == string(n)
+        @test req.body === body
+        @test length(req.body) == n
+        @test String(req.body) == String(copy(data))
+        # Raw routes read the original request; unused binding buffers must not
+        # make allocation grow with the request body size.
+        allocations = [@allocated(Servo.handle(ep, params, req)) for _ in 1:5]
+        @test minimum(allocations) < 4096
+    end
+
+    # A raw handler owns stream reads. Servo must neither materialize nor close
+    # the body before the handler receives it, including a partially read body.
+    source = IOBuffer(b"prefix:payload")
+    read(source, 7)
+    reads = Ref(0)
+    body = HTTP.CallbackBody(dst -> (reads[] += 1; readbytes!(source, dst, length(dst))),
+        () -> close(source))
+    req = HTTP.Request("POST", "/raw-stream", [], body)
+    ep = Servo.register!(router, :POST, "/raw-stream", function(req)
+        data = Vector{UInt8}(undef, 7)
+        n = HTTP.body_read!(req.body, data)
+        Servo.Response(200, String(data[1:n]))
+    end; auth=Servo.Public())
+    try
+        @test Servo.handle(ep, params, req).body == "payload"
+        @test reads[] == 1
+        @test req.body === body
+        @test isopen(source)
+    finally
+        HTTP.body_close!(body)
+    end
+end
+
 @testset "binding & coercion over the mock transport" begin
     r = Servo.Router()
 

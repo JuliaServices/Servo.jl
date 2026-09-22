@@ -85,7 +85,7 @@ struct Endpoint
     segments::Vector{Segment}
     params::Vector{Param}
     target::Any   # introspection only; requests are invoked through `handler`
-    binder::Any   # introspection/inference only; wrapped inside `handler`
+    binder::Any   # nothing for raw routes; otherwise introspection/inference (invoked inside `handler`)
     auth::AuthScheme
     format::Format
     handler::HandlerFn
