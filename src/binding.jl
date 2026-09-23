@@ -50,8 +50,9 @@ Response(status::Integer, body::Union{AbstractString, AbstractVector{UInt8}}=UIn
     Servo.handle(endpoint, pathparams, request) -> Servo.Response
 
 The generic request pipeline entrypoint, shared by all transports. Extracts the
-query pairs, body bytes, and client address from the (concretely typed) transport
-request, then invokes the endpoint's type-erased handler, which authenticates
+query pairs and client address, plus body bytes for bound endpoints, from the
+(concretely typed) transport request, then invokes the endpoint's type-erased
+handler, which authenticates
 (or rate-limits a public endpoint), binds the target function's arguments, and
 packages the result. Throws `HTTPError` for all request-level failures;
 transports translate that into their wire format.
@@ -63,7 +64,7 @@ function handle(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}
     for (k, v) in rawquery(req)
         haskey(query, k) || (query[String(k)] = String(v))
     end
-    raw = rawbody(req)
+    raw = ep.binder === nothing ? nothing : rawbody(req)
     body = raw === nothing ? UInt8[] :
         raw isa Vector{UInt8} ? raw :
         raw isa AbstractVector{UInt8} ? Vector{UInt8}(raw) :
