@@ -456,6 +456,8 @@ end
     end
 end
 
+include("ratelimit_tests.jl")
+
 @testset "JSON format extension" begin
     @test Base.get_extension(Servo, :ServoJSONExt) !== nothing
     @test Servo.mime(Servo.JSONFormat()) == "application/json; charset=utf-8"
