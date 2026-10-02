@@ -146,7 +146,7 @@ end
 
 _upstream_finding(block) = any(p -> occursin(p, block), _TRIM_UPSTREAM_PATTERNS)
 
-function _run_trim_case(project_path::String, script_file::String, output_name::String)
+function _run_trim_case(project_path::String, script_file::String, output_name::String; allow_upstream::Bool=true)
     script_path = joinpath(@__DIR__, script_file)
     @test isfile(script_path)
     println("[trim] compile START $(script_file)")
@@ -174,15 +174,16 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
             else
                 totals
             end
-            # zero Servo-attributable findings on every Julia; findings matching
-            # _TRIM_UPSTREAM_PATTERNS are known upstream gaps
-            unexpected = [b for b in _finding_blocks(output) if !_upstream_finding(b)]
+            # Core-only workloads require a working executable even when the
+            # full server still reaches known upstream trim gaps.
+            unexpected = [b for b in _finding_blocks(output) if !allow_upstream || !_upstream_finding(b)]
             if !isempty(unexpected)
                 println("---- unexpected trim verifier findings ($(script_file)) ----")
                 foreach(println, unexpected)
                 println("---- end unexpected findings ----")
             end
             @test isempty(unexpected)
+            allow_upstream || @test (trim_errors, trim_warnings) == (0, 0)
             output_path = Sys.iswindows() ? "$(output_name).exe" : output_name
             if trim_errors == 0 && trim_warnings == 0
                 run_path = bundle_dir === nothing ? output_path : joinpath(bundle_dir, "bin", output_path)
@@ -224,10 +225,11 @@ end
     else
         project_path = _setup_trim_env()
         trim_workloads = [
-            ("servo_trim_safe.jl", "servo_trim_safe"),
+            ("servo_trim_safe.jl", "servo_trim_safe", true),
+            ("ratelimit_trim_safe.jl", "ratelimit_trim_safe", false),
         ]
-        for (script_file, output_name) in trim_workloads
-            _run_trim_case(project_path, script_file, output_name)
+        for (script_file, output_name, allow_upstream) in trim_workloads
+            _run_trim_case(project_path, script_file, output_name; allow_upstream)
         end
     end
 end
