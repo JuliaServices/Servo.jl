@@ -1,6 +1,6 @@
 module Servo
 
-using Logging, Dates, HTTP, JSON, Figgy, DBInterface, Postgres, Tables, ConcurrentUtilities, ScopedValues
+using Logging, Dates, HTTP, JSON, Figgy, DBInterface, Postgres, Tables, ConcurrentUtilities, ScopedValues, Encid
 
 precompiling() = ccall(:jl_generating_output, Cint, ()) == 1
 
@@ -29,7 +29,6 @@ include("json_logging.jl")
 include("json_middleware.jl")
 # include("auth_middleware.jl")
 include("routing.jl")
-include("uids/UIDs.jl"); using .UIDs
 include("obs.jl"); using .Obs
 include("crypt.jl"); using .Crypt
 include("postgres.jl")
