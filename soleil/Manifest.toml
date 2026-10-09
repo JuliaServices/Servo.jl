@@ -277,7 +277,7 @@ version = "1.11.0"
 
 [[deps.Servo]]
 deps = ["Figgy", "HTTP", "Logging"]
-git-tree-sha1 = "d6951970f171a039c7f9ed1c76782921e971a4ae"
+git-tree-sha1 = "4d27426a9d7a184f5b17e4b41a3601ea9e1cc8da"
 repo-rev = "rewrite"
 repo-url = "https://github.com/JuliaServices/Servo.jl"
 uuid = "169596a4-850b-412e-9996-453439081821"
