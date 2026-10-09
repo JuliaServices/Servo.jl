@@ -141,6 +141,15 @@ end
     @test Set(ep.method for ep in r.endpoints) == Set([:GET, :PUT])
 end
 
+@testset "unmatched route allocations" begin
+    pattern = Servo.parsepattern("/{id}/details")
+    missing = ["42", "other"]
+    @test Servo.matchsegments(pattern, missing) === nothing
+    Servo.matchsegments(pattern, missing)
+    @test (@allocated Servo.matchsegments(pattern, missing)) <= 64
+    @test Servo.matchsegments(pattern, ["42", "details"]) == Dict(:id => "42")
+end
+
 @testset "wildcards & catch-alls" begin
     r = Servo.Router()
     tep(method, path; params=Servo.Param[]) = Servo.register!(r, Servo.Endpoint(;
