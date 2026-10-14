@@ -7,7 +7,8 @@ envelope `(; error = (; message, code))` using the endpoint's `Format`.
 
 `headers` are added to the error response, e.g. `WWW-Authenticate` on a 401 or
 `Retry-After` on a 429. A `body` string replaces the envelope verbatim, for
-clients that expect another error shape (set its `Content-Type` in `headers`).
+clients that expect another error shape. It is sent with the endpoint format's
+`Content-Type` unless `headers` sets one.
 """
 struct HTTPError <: Exception
     status::Int

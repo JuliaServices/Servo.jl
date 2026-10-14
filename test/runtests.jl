@@ -709,6 +709,9 @@ struct ProviderDown <: Exception end
     Servo.@GET r "/unlimited" Servo.Public(ratelimit=false) format=Servo.TextFormat() function unlimited()
         "ok"
     end
+    Servo.@GET r "/method" public format=Servo.TextFormat() function method()
+        Servo.withrequest((req::HTTP.Request) -> req.method)
+    end
 
     onerror = function (e, ep, req)
         e isa ProviderDown && return Servo.Response(502, "provider down")
@@ -736,14 +739,25 @@ struct ProviderDown <: Exception end
     @test resp.status == 404 && String(resp.body) == "{}"
     @test handler(HTTP.Request("POST", "/csv")).status == 405
 
-    # a buffered HTTP.Response passes through; a streaming one needs serve!
+    # a buffered HTTP.Response passes through; a streaming one is wrapped in a
+    # StreamBody that reads and closes the original stream
     resp = handler(HTTP.Request("GET", "/csv"))
     @test resp.status == 201 && String(resp.body) == "a,b"
     @test HTTP.header(resp, "Content-Disposition") == "attachment"
-    @test (@test_logs (:error,) match_mode=:any handler(HTTP.Request("GET", "/events"))).status == 500
+    resp = handler(HTTP.Request("GET", "/events"))
+    @test resp.status == 200 && resp.body isa Servo.StreamBody
+    @test HTTP.header(resp, "Content-Type") == "text/event-stream"
+    buf = Vector{UInt8}(undef, 64)
+    n = HTTP.body_read!(resp.body, buf)
+    @test String(buf[1:n]) == "data: hi\n\n"
+    HTTP.body_close!(resp.body)
+    @test HTTP.body_closed(resp.body)
 
     # HEAD routes like GET
     @test handler(HTTP.Request("HEAD", "/csv")).status == 201
+
+    # typed endpoints read the raw request through Servo.withrequest
+    @test String(handler(HTTP.Request("GET", "/method")).body) == "GET"
 
     # Public(ratelimit=false) skips the public rate limiter
     try
@@ -759,7 +773,15 @@ struct ProviderDown <: Exception end
     @test Servo.header(Servo.Response(200, "x"; headers=["Content-Type" => "text/plain"]), "content-type") == "text/plain"
     @test Servo.header(Servo.Response(200), "ETag", "none") == "none"
 
-    # over a real server: streaming responses pass through, HEAD has no body
+    # over a real server, through both serve! and a plain HTTP.serve!:
+    # streams arrive intact, HEAD has no body
+    plain = HTTP.serve!(handler, "127.0.0.1", 0)
+    try
+        resp = HTTP.get("http://127.0.0.1:$(HTTP.port(plain))/events")
+        @test resp.status == 200 && String(resp.body) == "data: hi\n\n"
+    finally
+        close(plain)
+    end
     server = Servo.serve!(r; host="127.0.0.1", port=0, onerror)
     try
         base = "http://127.0.0.1:$(Servo.port(server))"

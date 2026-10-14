@@ -188,11 +188,13 @@ format negotiation — but **auth is not an escape hatch**: raw routes declare
 that batch).
 
 On HTTP, a raw handler may also return an `HTTP.Response`. Buffered bodies
-(strings, byte vectors) are sent as usual. Other bodies, such as SSE streams
-or a protocol library's own responses, are passed through by `Servo.serve!`/
-`run!`; `Servo.httphandler` answers them with a 500 instead, because an
-arbitrary body type would leave the server's write path dynamically
-dispatched under juliac --trim.
+(strings, byte vectors) are sent as usual. Any other body, such as an SSE
+stream or a protocol library's own response, is wrapped in a `Servo.StreamBody`:
+one concrete body type that calls the wrapped body's `body_read!`/`body_close!`/
+`body_closed` through function pointers specialized on its type (the
+`HandlerFn` trick again). So `httphandler` returns a closed set of response
+types and the server's write path stays statically dispatched under juliac
+--trim, streams included.
 
 `HEAD` requests are routed like `GET`; HTTP.jl drops the body.
 
@@ -413,6 +415,6 @@ boundary), and one-concrete-source-per-call Figgy loading.
 ## Deliberately deferred
 
 Managed cleanup hooks (DB pools etc.), background/scheduled task registry,
-metrics/observability, transport-neutral streaming responses (HTTP streams pass
-through `serve!` today, but not through trim-safe `httphandler`), config schemas/validation,
+metrics/observability, transport-neutral streaming responses (raw HTTP handlers
+can stream today), config schemas/validation,
 provider-specific auth schemes, authorization policies, request-id propagation.

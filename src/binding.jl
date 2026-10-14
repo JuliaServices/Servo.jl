@@ -56,12 +56,8 @@ function header(r::Response, name::AbstractString, default::AbstractString="")
     return String(default)
 end
 
-"""
-    Servo.NativeResponse(response)
-
-A transport-native response returned by a raw handler (e.g. an `HTTP.Response`
-with a streaming body), passed to the transport unchanged.
-"""
+# A transport-native response a raw handler returned (on HTTP: a streaming
+# `HTTP.Response`), passed to the transport unchanged.
 struct NativeResponse
     response::Any
 end
