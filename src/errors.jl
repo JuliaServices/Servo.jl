@@ -1,15 +1,24 @@
 """
-    Servo.HTTPError(status, message="")
+    Servo.HTTPError(status, message=""; headers=[], body=nothing)
 
 Exception any layer (handler, auth scheme, binding) can throw to produce a response
 with the given status code. The message is serialized into the standard error
 envelope `(; error = (; message, code))` using the endpoint's `Format`.
+
+`headers` are added to the error response, e.g. `WWW-Authenticate` on a 401 or
+`Retry-After` on a 429. A `body` string replaces the envelope verbatim, for
+clients that expect another error shape (set its `Content-Type` in `headers`).
 """
 struct HTTPError <: Exception
     status::Int
     message::String
+    headers::Vector{Pair{String, String}}
+    body::Union{Nothing, String}
 end
-HTTPError(status::Integer) = HTTPError(status, "")
+HTTPError(status::Integer, message::AbstractString=""; headers::AbstractVector=Pair{String, String}[],
+          body::Union{Nothing, AbstractString}=nothing) =
+    HTTPError(Int(status), String(message), convert(Vector{Pair{String, String}}, headers),
+              body === nothing ? nothing : String(body))
 
 Base.showerror(io::IO, e::HTTPError) = print(io, "HTTPError(", e.status, "): ", e.message)
 

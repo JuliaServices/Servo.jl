@@ -42,7 +42,29 @@ end
 Response(status::Integer, body::Union{AbstractString, AbstractVector{UInt8}}=UInt8[];
          headers::AbstractVector=Pair{String, String}[]) =
     Response(status, convert(Vector{Pair{String, String}}, headers),
-             body isa AbstractString ? String(body) : Vector{UInt8}(body))
+             body isa AbstractString ? String(body) : body isa Vector{UInt8} ? body : Vector{UInt8}(body))
+
+"""
+    Servo.header(response::Servo.Response, name, default="") -> String
+
+The value of a response header, matching `name` case-insensitively.
+"""
+function header(r::Response, name::AbstractString, default::AbstractString="")
+    for (k, v) in r.headers
+        lowercase(k) == lowercase(name) && return v
+    end
+    return String(default)
+end
+
+"""
+    Servo.NativeResponse(response)
+
+A transport-native response returned by a raw handler (e.g. an `HTTP.Response`
+with a streaming body), passed to the transport unchanged.
+"""
+struct NativeResponse
+    response::Any
+end
 
 # ── request handling ────────────────────────────────────────────────────────
 
@@ -89,7 +111,7 @@ end
 
 function (h::RequestHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    context = RequestContext(pr, call.req, call.pathparams)
+    context = RequestContext(pr, call.req, call.pathparams, call.query)
     return @with REQUEST_CONTEXT => context begin
         toresponse(h.format, h.binder(h.format, call.pathparams, call.query, call.body))
     end
@@ -111,19 +133,19 @@ end
 
 function (h::RawHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    context = RequestContext(pr, call.req, call.pathparams)
+    context = RequestContext(pr, call.req, call.pathparams, call.query)
     return @with REQUEST_CONTEXT => context begin
-        toresponse(h.format, h.f.f(call.req))
+        toresponse(h.format, withrequest(h.f.f, call.req, httponly(h.f.f)))
     end
 end
 
 # the shared gate: authenticate, or rate-limit an explicitly-Public route
 function checkauth(name::String, auth::AuthScheme, call::HandlerCall)
     if auth isa Public
-        checkratelimit!(name, call.clientip)
+        auth.ratelimit && checkratelimit!(name, call.clientip)
         return nothing
     end
-    pr = authenticate(auth, call.req)
+    pr = withrequest(req -> authenticate(auth, req), call.req, httponly(auth))
     pr === nothing && throw(HTTPError(401, "unauthorized"))
     return pr
 end
@@ -141,6 +163,10 @@ toresponse(fmt::Format, result) =
 # reference earlier arguments, as in a normal Julia call).
 
 hasquery(q::Dict{String, String}, name::String) = haskey(q, name)
+
+# `ArgumentError.msg` is an `AbstractString` field; use it only when it is a
+# `String`, so building the client message stays statically dispatched
+argmsg(e::ArgumentError) = (m = e.msg; m isa String ? m : "invalid argument")
 
 # return annotations keep binders fully inferable (so e.g. response types can be
 # derived from a binder's return type)
@@ -160,6 +186,8 @@ function bodyvalue(fmt::Format, ::Type{T}, body::Vector{UInt8}, name::Symbol)::T
         return deserialize(fmt, T, body)
     catch e
         e isa HTTPError && rethrow()
+        # keep a parser's own message: it tells the client what to fix
+        e isa ArgumentError && throw(HTTPError(400, "malformed request body for `$name`: $(argmsg(e))"))
         throw(HTTPError(400, "malformed request body for `$name`"))
     end
 end

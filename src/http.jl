@@ -63,6 +63,27 @@ function querypairs(query::AbstractString)
     return pairs
 end
 
+# Raw handlers and auth schemes receive the request from the type-erased
+# HandlerCall slot. `HTTP.Request` is parametric in its body type, so a call on
+# the erased value would need run-time dispatch, which juliac --trim cannot
+# verify. Narrow first to the request types HTTP.jl's server produces, plus
+# in-process requests built with a `String` body. `httponly` (constant-folded
+# from the callee's methods) drops the open fallback for callees that only
+# accept `HTTP.Request`.
+@inline function withrequest(f::F, @nospecialize(req), httponly::Bool) where {F}
+    req isa HTTP.Request{HTTP.BytesBody{Vector{UInt8}}} && return f(req)
+    req isa HTTP.Request{HTTP.EmptyBody} && return f(req)
+    req isa HTTP.Request{HTTP.BytesBody{Base.CodeUnits{UInt8, String}}} && return f(req)
+    httponly && error("unsupported HTTP request body type for an HTTP.Request-typed handler")
+    return f(req) # other transports' request types
+end
+
+# true when the callee accepts `HTTP.Request` but not arbitrary values; inference
+# folds `hasmethod` for a concrete callee type
+httponly(f) = hasmethod(f, Tuple{HTTP.Request}) && !hasmethod(f, Tuple{Any})
+httponly(auth::AuthScheme) = hasmethod(authenticate, Tuple{typeof(auth), HTTP.Request}) &&
+    !hasmethod(authenticate, Tuple{typeof(auth), Any})
+
 function bearertoken(@nospecialize(req::HTTP.Request))
     # Reached through checkauth's Any-typed request slot: `@nospecialize` gives
     # one statically-invokable instance, and dispatching the header lookup on
@@ -98,67 +119,111 @@ function clientip(req::HTTP.Request)
 end
 
 """
-    Servo.httphandler(router) -> f(::HTTP.Request)::HTTP.Response
+    Servo.httphandler(router; onerror=nothing) -> f(::HTTP.Request)::HTTP.Response
 
 The HTTP request handler for a router: match, `Servo.handle`, and translate
-results/errors into HTTP responses. Errors are serialized into a stable
+results/errors into HTTP responses. `HEAD` requests are routed like `GET`
+(HTTP.jl omits the body). Errors are serialized into a stable
 `(; error = (; message, code))` envelope with the endpoint's format (plain text
 when no endpoint was matched).
+
+`onerror(exception, endpoint, request)` runs first for every exception,
+including Servo's own 404/405/401/400 `HTTPError`s, while the backtrace is still
+available. It returns a `Servo.Response` to send, or `nothing` for the default
+mapping: `HTTPError` → its status, `ArgumentError` → 400, anything else → a
+logged, sanitized 500. `endpoint` is `nothing` when no route matched.
+
+A raw handler may return an `HTTP.Response`. Buffered bodies (strings and byte
+vectors) are sent as usual. Other bodies, such as streams, need
+[`Servo.serve!`](@ref); this handler answers them with a 500, because passing
+an arbitrary body type through would leave the server's write path dynamically
+dispatched under juliac --trim.
 """
-function httphandler(router::Router)
+httphandler(router::Router; onerror=nothing) = _httphandler(router, onerror, Val(false))
+
+function _httphandler(router::Router, onerror::E, ::Val{native}) where {E, native}
     return function(req::HTTP.Request)
         ep = nothing
         try
             path, _ = splittarget(req.target)
             segments = String[percentdecode(s) for s in splitsegments(path)]
-            m = matchroute(router, Symbol(req.method), segments)
+            method = req.method == "HEAD" ? :GET : Symbol(req.method)
+            m = matchroute(router, method, segments)
             m === nothing && throw(HTTPError(404, "no route for $(req.method) $path"))
             m === :method_not_allowed &&
                 throw(HTTPError(405, "$(req.method) not allowed for $path"))
             ep, pathparams = m
             resp = handle(ep, pathparams, req)
-            # branch on the body union so each HTTP.Response constructor call
-            # is concrete (a union-typed `body` keyword widens the response
-            # type past what the trim verifier can resolve on the write path)
-            body = resp.body
-            body isa String &&
-                return HTTP.Response(resp.status; headers=resp.headers, body=body)
-            return HTTP.Response(resp.status; headers=resp.headers, body=body::Vector{UInt8})
+            if resp isa NativeResponse
+                native && return resp.response::HTTP.Response
+                throw(ErrorException("$(ep.name) returned a streaming HTTP.Response; serve it with Servo.serve!"))
+            end
+            return httpresponse(resp)
         catch e
+            if onerror !== nothing
+                r = onerror(e, ep, req)
+                r === nothing || return httpresponse(r::Response)
+            end
             # Narrow the catch value before reading its fields. A catch value
             # has type Any, so passing it through a generic error-mapping helper
             # leaves dynamic dispatch in every compiled HTTP.Request method.
             # These branches preserve the public policy and keep the transport
             # statically callable under JuliaC --trim.
             if e isa HTTPError
-                return errorresponse(ep, e.status, e.message)
+                return errorresponse(ep, e)
             elseif e isa ArgumentError
-                return errorresponse(ep, 400, e.msg)
+                return errorresponse(ep, HTTPError(400, argmsg(e)))
             end
             @error "unhandled exception in endpoint $(ep === nothing ? "<unmatched>" : ep.name)" exception=(e, catch_backtrace())
-            return errorresponse(ep, 500, "internal server error")
+            return errorresponse(ep, HTTPError(500, "internal server error"))
         end
     end
 end
 
-function errorresponse(ep::Union{Endpoint, Nothing}, status::Int, message::String)
-    if ep !== nothing
+# branch on the body union so each HTTP.Response constructor call is concrete
+# (a union-typed `body` keyword widens the response type past what the trim
+# verifier can resolve on the write path)
+function httpresponse(r::Response)
+    body = r.body
+    body isa String && return HTTP.Response(r.status; headers=r.headers, body=body)
+    return HTTP.Response(r.status; headers=r.headers, body=body::Vector{UInt8})
+end
+
+# An HTTP.Response returned by a raw handler: buffered bodies become a
+# Servo.Response (without copying a byte vector); any other body is passed
+# through to the transport as-is.
+function toresponse(::Format, r::HTTP.Response)
+    b = r.body
+    body = b isa String ? b :
+        b isa Vector{UInt8} ? b :
+        b isa HTTP.EmptyBody ? UInt8[] :
+        b isa HTTP.BytesBody ? (b.data isa Vector{UInt8} ? b.data : Vector{UInt8}(b.data)) :
+        nothing
+    body === nothing && return NativeResponse(r)
+    return Response(r.status, body; headers=r.headers)
+end
+
+function errorresponse(ep::Union{Endpoint, Nothing}, e::HTTPError)
+    status, message = e.status, e.message
+    headers = Pair{String, String}[]
+    if e.body !== nothing
+        body = e.body
+    elseif ep !== nothing
         body = try
             errorbody(ep.format, message, status)
         catch
             message
         end
-        return HTTP.Response(
-            status;
-            headers=["Content-Type" => mime(ep.format)],
-            body,
-        )
+        push!(headers, "Content-Type" => mime(ep.format))
+    else
+        body = message
+        push!(headers, "Content-Type" => "text/plain; charset=utf-8")
     end
-    return HTTP.Response(
-        status;
-        headers=["Content-Type" => "text/plain; charset=utf-8"],
-        body=message,
-    )
+    for h in e.headers
+        filter!(x -> lowercase(x.first) != lowercase(h.first), headers)
+        push!(headers, h)
+    end
+    return httpresponse(Response(status, body; headers))
 end
 
 const CORS_ALLOW_HEADERS = "Origin, X-Requested-With, Content-Type, Accept, Authorization"
@@ -210,8 +275,8 @@ function accesslog_middleware(handler)
 end
 
 """
-    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080,
-                 middleware=identity, cors=false, accesslog=false, kw...)
+    Servo.serve!(router=Servo.ROUTER; host="0.0.0.0", port=8080, middleware=identity,
+                 onerror=nothing, cors=false, accesslog=false, kw...)
 
 Start (non-blocking) an HTTP server for a router and return the server handle
 (`wait` it to block, `close` it to stop). Prefer [`Servo.run!`](@ref), which also
@@ -222,6 +287,9 @@ entrypoint. Remaining `kw` pass through to `HTTP.listen!`.
 request handler. It can mount a protocol-native handler before Servo routing,
 including handlers that return streaming HTTP response bodies. Servo's CORS and
 access-log middleware wrap the result, so they also cover mounted paths.
+
+Raw handlers may return any `HTTP.Response`, including streaming bodies (SSE).
+`onerror` maps exceptions to responses; see [`Servo.httphandler`](@ref).
 
 `cors` is `false` (no CORS headers), `true` (allow every browser origin), or a
 `Vector{String}` of allowed origins; see [`Servo.cors_middleware`](@ref).
@@ -239,9 +307,9 @@ the header your proxy sets (e.g. `"Fly-Client-IP"`); otherwise every client
 shares one public rate-limit bucket.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                middleware=identity, cors::Union{Bool, Vector{String}}=false,
+                middleware=identity, onerror=nothing, cors::Union{Bool, Vector{String}}=false,
                 accesslog::Bool=false, kw...)
-    handler = middleware(httphandler(router))
+    handler = middleware(_httphandler(router, onerror, Val(true)))
     applicable(handler, HTTP.Request("GET", "/")) || throw(ArgumentError(
         "middleware must return a handler callable with an HTTP.Request",
     ))

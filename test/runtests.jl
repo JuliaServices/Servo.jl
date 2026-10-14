@@ -679,6 +679,100 @@ end
     end
 end
 
+# a scheme typed on HTTP.Request, as HTTP apps write them
+struct KeyHeaderAuth <: Servo.AuthScheme end
+Servo.authenticate(::KeyHeaderAuth, req::HTTP.Request) =
+    HTTP.header(req.headers, "X-Key", "") == "k" ? "key-user" : nothing
+
+struct ProviderDown <: Exception end
+
+@testset "HTTP errors, native responses, HEAD, and request accessors" begin
+    r = Servo.Router()
+    Servo.register!(r, "GET", "/typed/{id}", function typed(req::HTTP.Request)
+        Servo.Response(200, "$(Servo.pathparams()[:id]):$(Servo.principal()):$(Servo.query()["q"])")
+    end; auth=KeyHeaderAuth())
+    Servo.register!(r, "GET", "/challenge", function challenge(req::HTTP.Request)
+        throw(Servo.HTTPError(401; headers=["WWW-Authenticate" => "Bearer realm=\"x\""],
+                              body="{\"error\":\"invalid_token\"}"))
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/provider", function provider(req::HTTP.Request)
+        throw(ProviderDown())
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/csv", function csv(req::HTTP.Request)
+        HTTP.Response(201, ["Content-Disposition" => "attachment"], Vector{UInt8}("a,b"))
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/events", function events(req::HTTP.Request)
+        HTTP.sse_stream(200) do stream
+            write(stream, HTTP.SSEEvent("hi"))
+        end
+    end; auth=Servo.Public())
+    Servo.@GET r "/unlimited" Servo.Public(ratelimit=false) format=Servo.TextFormat() function unlimited()
+        "ok"
+    end
+
+    onerror = function (e, ep, req)
+        e isa ProviderDown && return Servo.Response(502, "provider down")
+        e isa Servo.HTTPError && e.status == 404 && return Servo.Response(404, "{}"; headers=["Content-Type" => "application/json"])
+        return nothing
+    end
+    handler = Servo.httphandler(r; onerror)
+
+    # HTTP.Request-typed raw handlers and auth schemes, plus Servo.query()
+    resp = handler(HTTP.Request("GET", "/typed/7?q=hi", ["X-Key" => "k"]))
+    @test resp.status == 200 && String(resp.body) == "7:key-user:hi"
+    @test handler(HTTP.Request("GET", "/typed/7?q=hi", ["X-Key" => "k"], "with body")).status == 200
+    @test handler(HTTP.Request("GET", "/typed/7")).status == 401
+
+    # HTTPError headers and verbatim body
+    resp = handler(HTTP.Request("GET", "/challenge"))
+    @test resp.status == 401
+    @test HTTP.header(resp, "WWW-Authenticate") == "Bearer realm=\"x\""
+    @test String(resp.body) == "{\"error\":\"invalid_token\"}"
+
+    # onerror maps app exceptions and Servo's own errors; nothing keeps the default
+    resp = handler(HTTP.Request("GET", "/provider"))
+    @test resp.status == 502 && String(resp.body) == "provider down"
+    resp = handler(HTTP.Request("GET", "/nope"))
+    @test resp.status == 404 && String(resp.body) == "{}"
+    @test handler(HTTP.Request("POST", "/csv")).status == 405
+
+    # a buffered HTTP.Response passes through; a streaming one needs serve!
+    resp = handler(HTTP.Request("GET", "/csv"))
+    @test resp.status == 201 && String(resp.body) == "a,b"
+    @test HTTP.header(resp, "Content-Disposition") == "attachment"
+    @test (@test_logs (:error,) match_mode=:any handler(HTTP.Request("GET", "/events"))).status == 500
+
+    # HEAD routes like GET
+    @test handler(HTTP.Request("HEAD", "/csv")).status == 201
+
+    # Public(ratelimit=false) skips the public rate limiter
+    try
+        Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=0.0, burst=0.0)
+        @test handler(HTTP.Request("GET", "/unlimited")).status == 200
+        resp = handler(HTTP.Request("GET", "/csv"))
+        @test resp.status == 429
+        @test HTTP.header(resp, "Retry-After") == ""  # a zero rate never refills
+    finally
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+
+    @test Servo.header(Servo.Response(200, "x"; headers=["Content-Type" => "text/plain"]), "content-type") == "text/plain"
+    @test Servo.header(Servo.Response(200), "ETag", "none") == "none"
+
+    # over a real server: streaming responses pass through, HEAD has no body
+    server = Servo.serve!(r; host="127.0.0.1", port=0, onerror)
+    try
+        base = "http://127.0.0.1:$(Servo.port(server))"
+        resp = HTTP.get(base * "/events")
+        @test resp.status == 200 && String(resp.body) == "data: hi\n\n"
+        resp = HTTP.request("HEAD", base * "/csv")
+        @test resp.status == 201 && isempty(resp.body)
+        @test HTTP.get(base * "/provider"; status_exception=false).status == 502
+    finally
+        close(server)
+    end
+end
+
 @testset "CORS and access log middleware" begin
     ok = req -> HTTP.Response(200, ["Vary" => "Accept-Encoding"], "ok")
     origin(o) = ["Origin" => o]
@@ -801,6 +895,17 @@ end
         Servo.PUBLIC_RATE_LIMITER[] = nothing
     end
 
+    # builtins=false leaves /status and /version to the app
+    r3 = Servo.Router()
+    server = Servo.run!("TestApp", "prod"; router=r3, host="127.0.0.1", port=0, configdir,
+                        builtins=false, accesslog=false, log=false)
+    try
+        @test isempty(r3.endpoints)
+    finally
+        close(server)
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+
     # A failed setup stops before Servo registers builtins or opens a listener.
     failed_router = Servo.Router()
     @test_throws ErrorException Servo.run!(
@@ -819,7 +924,7 @@ end
     # non-local profile: no CORS, and the configured rate limit is enforced
     r2 = Servo.Router()
     server = Servo.run!("TestApp", "prod"; router=r2, host="127.0.0.1", port=0, configdir,
-                        configs=Dict("public_ratelimit_rps" => 0.1, "public_ratelimit_burst" => 2.0,
+                        configs=Dict("public_ratelimit_rps" => 0.01, "public_ratelimit_burst" => 2.0,
                                      "cors_origins" => "https://app.example.com, https://admin.example.com",
                                      "client_ip_header" => "Fly-Client-IP"),
                         accesslog=false, log=false)
@@ -837,7 +942,10 @@ end
         resp = HTTP.get(base * "/status"; headers=["Origin" => "https://evil.example.com"],
                         status_exception=false)
         @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
-        @test HTTP.get(base * "/status"; status_exception=false).status == 429
+        # retry=false: the client would otherwise honor Retry-After and wait
+        resp = HTTP.get(base * "/status"; status_exception=false, retry=false)
+        @test resp.status == 429
+        @test HTTP.header(resp, "Retry-After") == "100"
         # the proxy-set client address keys its own bucket
         @test HTTP.get(base * "/status"; headers=["Fly-Client-IP" => "198.51.100.8"],
                        status_exception=false).status == 200

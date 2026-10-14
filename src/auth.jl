@@ -76,14 +76,18 @@ function authenticate(auth::BearerAuth, @nospecialize(request))
 end
 
 """
-    Public()
+    Public(; ratelimit=true)
 
 Explicitly marks an endpoint as publicly accessible with **no** authentication.
 Requiring this to be spelled out is the point: an endpoint is never accidentally
 public because of where it happened to be registered. Public endpoints get Servo's
-default per-client rate limiting when the app is started via `Servo.run!`.
+default per-client rate limiting when the app is started via `Servo.run!`;
+`ratelimit=false` opts an endpoint out (e.g. internal callers that batch).
 """
-struct Public <: AuthScheme end
+struct Public <: AuthScheme
+    ratelimit::Bool
+end
+Public(; ratelimit::Bool=true) = Public(ratelimit)
 
 # Ambient per-request state: ScopedValues, so the context propagates into tasks
 # spawned inside a handler. ScopedValues.jl supplies the Julia 1.10 backport and
@@ -92,9 +96,10 @@ struct RequestContext
     principal::Any
     request::Any
     pathparams::Dict{Symbol, String}
+    query::Dict{String, String}
 end
 
-const REQUEST_CONTEXT = ScopedValue(RequestContext(nothing, nothing, Dict{Symbol, String}()))
+const REQUEST_CONTEXT = ScopedValue(RequestContext(nothing, nothing, Dict{Symbol, String}(), Dict{String, String}()))
 
 """
     Servo.principal()
@@ -121,3 +126,12 @@ arguments already; this accessor exists for raw handlers (registered via
 `register!(router, method, path, handler; ...)`), where no binding happens.
 """
 pathparams() = REQUEST_CONTEXT[].pathparams
+
+"""
+    Servo.query() -> Dict{String, String}
+
+The current request's query parameters (the first value of each repeated key),
+percent-decoded. Bound endpoints receive declared parameters as keyword
+arguments; this accessor is for raw handlers and for reading the whole query.
+"""
+query() = REQUEST_CONTEXT[].query

@@ -71,6 +71,8 @@ const PUBLIC_RATE_LIMITER = Ref{Union{RateLimiter, Nothing}}(nothing)
 function checkratelimit!(name::String, client::String)
     rl = PUBLIC_RATE_LIMITER[]
     rl === nothing && return
-    allow!(rl, (name, client)) || throw(HTTPError(429, "rate limit exceeded"))
-    return
+    allow!(rl, (name, client)) && return
+    # ponytail: time to refill one whole token, an upper bound on the wait
+    headers = rl.rps > 0 ? ["Retry-After" => string(ceil(Int, 1 / rl.rps))] : Pair{String, String}[]
+    throw(HTTPError(429, "rate limit exceeded"; headers))
 end

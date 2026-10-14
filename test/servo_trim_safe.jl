@@ -34,6 +34,11 @@ end
 Servo.authenticate(a::TrimAuth, req::TrimRequest) =
     any(kv -> kv.first == "key" && kv.second == a.key, req.query) ? "trim-user" : nothing
 
+# A scheme typed on the real HTTP request, as HTTP apps write them.
+struct TrimHTTPAuth <: Servo.AuthScheme end
+Servo.authenticate(::TrimHTTPAuth, req::HTTP.Request) =
+    HTTP.header(req.headers, "X-Key", "") == "k" ? "http-user" : nothing
+
 struct TrimWidget
     id::Int
     tags::Vector{String}
@@ -110,6 +115,17 @@ function _buildapp()
         Servo.request() === req || return Servo.Response(500, "wrong request")
         Servo.Response(200, "mirror:" * Servo.pathparams()[:id])
     end; auth=Servo.Public())
+    # The HTTP-typed raw handler and scheme an HTTP.Router migration produces.
+    Servo.register!(r, :GET, "/http-raw/{id}", function httpraw(req::HTTP.Request)
+        Servo.Response(200, "raw:" * Servo.pathparams()[:id] * ":" * String(Servo.principal()::String))
+    end; auth=TrimHTTPAuth())
+    # an HTTP.Response from a raw handler, and an HTTPError with headers
+    Servo.register!(r, :GET, "/http-native", function httpnative(req::HTTP.Request)
+        HTTP.Response(201, ["X-Made" => "yes"], "made")
+    end; auth=Servo.Public())
+    Servo.register!(r, :GET, "/challenge", function challenge(req::HTTP.Request)
+        throw(Servo.HTTPError(401, "no"; headers=["WWW-Authenticate" => "Bearer"], body="{}"))
+    end; auth=Servo.Public(ratelimit=false))
     return r
 end
 
@@ -127,7 +143,7 @@ function _trim_routing(r::Servo.Router)::Nothing
     _trim_assert(pp[:id] == "42", "path param captured")
     _trim_assert(Servo.matchroute(r, "PUT", "/items/42") === :method_not_allowed, "405")
     _trim_assert(Servo.matchroute(r, "GET", "/nope") === nothing, "404")
-    _trim_assert(length(r.endpoints) == 12, "route table size")
+    _trim_assert(length(r.endpoints) == 15, "route table size")
 
     # catch-all: binds the slash-joined remainder, needs at least one segment
     ep, pp = _getep(r, "GET", "/docs/guide/intro")
@@ -168,6 +184,33 @@ function _trim_http_transport(r::Servo.Router)::Nothing
     response = handler(HTTP.Request("POST", "/argument-error", HTTP.Headers(), "request"))
     _trim_assert(response.status == 400, "HTTP body transport argument error status")
     _trim_assert(String(response.body) == "invalid request", "HTTP body transport argument error body")
+
+    # HTTP-typed raw handlers and auth schemes, for both request body types
+    # HTTP.jl's server produces.
+    response = handler(HTTP.Request("GET", "/http-raw/5", ["X-Key" => "k"]))
+    _trim_assert(response.status == 200, "HTTP raw handler status")
+    _trim_assert(String(response.body) == "raw:5:http-user", "HTTP raw handler body")
+    response = handler(HTTP.Request("GET", "/http-raw/5", ["X-Key" => "k"], UInt8[]))
+    _trim_assert(response.status == 200, "HTTP raw handler with a byte body")
+    response = handler(HTTP.Request("GET", "/http-raw/5"))
+    _trim_assert(response.status == 401, "HTTP auth scheme denies")
+    response = handler(HTTP.Request("HEAD", "/http-raw/5", ["X-Key" => "k"]))
+    _trim_assert(response.status == 200, "HEAD routes like GET")
+
+    response = handler(HTTP.Request("GET", "/http-native"))
+    _trim_assert(response.status == 201 && String(response.body) == "made", "HTTP.Response passthrough")
+    _trim_assert(HTTP.header(response, "X-Made") == "yes", "HTTP.Response headers")
+    response = handler(HTTP.Request("GET", "/challenge"))
+    _trim_assert(response.status == 401 && HTTP.header(response, "WWW-Authenticate") == "Bearer",
+                 "HTTPError headers")
+
+    # onerror maps exceptions, including Servo's own 404
+    mapped = Servo.httphandler(r; onerror = function (e, ep, req)
+        e isa Servo.HTTPError && e.status == 404 && return Servo.Response(404, "{}")
+        return nothing
+    end)
+    _trim_assert(String(mapped(HTTP.Request("GET", "/nope")).body) == "{}", "onerror 404")
+    _trim_assert(mapped(HTTP.Request("GET", "/internal-error")).status == 500, "onerror default")
     return nothing
 end
 

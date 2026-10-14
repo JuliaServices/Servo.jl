@@ -45,7 +45,8 @@ Config keys read here:
 
 Keywords: `router=Servo.ROUTER`, `host="0.0.0.0"`, `port=nothing` (falls back to
 the `port` config key, then 8080), `configdir=nothing`, `configs=Dict()`,
-`setup=Returns(nothing)`, `middleware=identity` (forwarded to [`serve!`](@ref)),
+`setup=Returns(nothing)`, `middleware=identity` and `onerror=nothing` (forwarded
+to [`serve!`](@ref)), `builtins=true` (register `GET /status` and `/version`),
 `accesslog=true`, `log=!isinteractive()`.
 
 `setup` runs once after configuration is available and before Servo opens the
@@ -55,8 +56,8 @@ tables. If it throws, `run!` stops without starting the server.
 function run!(name::AbstractString="Servo", profile::AbstractString="";
               router::Router=ROUTER, host="0.0.0.0", port::Union{Integer, Nothing}=nothing,
               configdir::Union{AbstractString, Nothing}=nothing, configs=Dict{String, Any}(),
-              setup=Returns(nothing), middleware=identity,
-              accesslog::Bool=true, log::Bool=!isinteractive())
+              setup=Returns(nothing), middleware=identity, onerror=nothing,
+              builtins::Bool=true, accesslog::Bool=true, log::Bool=!isinteractive())
     @info "$name init" julia=Base.VERSION threads=Threads.nthreads()
     prof = loadconfig!(; profile, configdir, configs, log)
     # Configuration must be ready before application provisioning runs. The
@@ -67,11 +68,11 @@ function run!(name::AbstractString="Servo", profile::AbstractString="";
     PUBLIC_RATE_LIMITER[] = RateLimiter(;
         rps=_float(config("public_ratelimit_rps", 5.0)),
         burst=_float(config("public_ratelimit_burst", 20.0)))
-    registerbuiltins!(router)
+    builtins && registerbuiltins!(router)
     CLIENT_IP_HEADER[] = config("client_ip_header", "")
     origins = config("cors_origins", nothing)
     cors = origins === nothing ? prof == "local" : _origins(origins)
-    server = serve!(router; host, port=p, middleware, cors, accesslog)
+    server = serve!(router; host, port=p, middleware, onerror, cors, accesslog)
     @info "$name listening" profile=prof host port=Servo.port(server) cors endpoints=length(router.endpoints)
     return server
 end
