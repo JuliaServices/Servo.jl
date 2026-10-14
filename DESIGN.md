@@ -206,6 +206,14 @@ before calling them; for callees that accept only `HTTP.Request`, the open
 fallback is folded away at compile time. Untyped handlers cost one dynamic
 dispatch.
 
+`httphandler` returns exactly three concrete types: `HTTP.Response{String}`,
+`HTTP.Response{Vector{UInt8}}`, and `HTTP.Response{Servo.StreamBody}`. App
+middleware wrapped around it must keep to that set. A fourth type (for example
+`HTTP.Response(204)`, whose body is `EmptyBody`) widens the server's response
+to the abstract `HTTP.Response`, and the verifier then reports dynamic calls
+inside HTTP.jl's write path, far from the cause. Build extra responses with a
+`String` or `Vector{UInt8}` body (`HTTP.Response(204, UInt8[])`).
+
 ### Migrating from HTTP.Router
 
 - `register!(r, "GET", "/api/thing/{id}", handler)` → same call plus `auth=...`;
