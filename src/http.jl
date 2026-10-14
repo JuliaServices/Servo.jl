@@ -76,10 +76,21 @@ function bearertoken(@nospecialize(req::HTTP.Request))
     return String(parts[2])
 end
 
+"""
+Header that carries the client address set by a trusted proxy, such as
+`"Fly-Client-IP"` or `"X-Forwarded-For"`. Empty (the default) trusts only the
+transport peer. `Servo.run!` sets it from the `client_ip_header` config key.
+"""
+const CLIENT_IP_HEADER = Ref("")
+
 function clientip(req::HTTP.Request)
-    # trust X-Forwarded-For when present (set by the load balancer in real deploys)
-    xff = HTTP.header(req, "X-Forwarded-For", "")
-    isempty(xff) || return String(strip(first(split(xff, ','))))
+    name = CLIENT_IP_HEADER[]
+    if !isempty(name)
+        value = HTTP.header(req.headers, name, "")
+        # A proxy appends the address it saw to the end of X-Forwarded-For;
+        # earlier entries come from the client and can be forged.
+        isempty(value) || return String(strip(last(split(value, ','))))
+    end
     # the context slot is Any-typed; narrowing here keeps `handle`'s client-key
     # conversion statically dispatched under juliac --trim
     ip = get(HTTP.get_request_context(req), :peerip, nothing)
@@ -150,19 +161,38 @@ function errorresponse(ep::Union{Endpoint, Nothing}, status::Int, message::Strin
     )
 end
 
-const CORS_HEADERS = [
-    "Access-Control-Allow-Origin" => "*",
-    "Access-Control-Allow-Headers" => "Origin, X-Requested-With, Content-Type, Accept, Authorization",
-    "Access-Control-Allow-Methods" => "GET, POST, PUT, DELETE, PATCH, QUERY, OPTIONS",
-    "Access-Control-Allow-Credentials" => "true",
-]
+const CORS_ALLOW_HEADERS = "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+const CORS_ALLOW_METHODS = "GET, POST, PUT, DELETE, PATCH, QUERY, OPTIONS"
 
-function cors_middleware(handler)
+"""
+    Servo.cors_middleware(handler, origins=nothing)
+
+Answer CORS preflight (`OPTIONS`) requests with a 204 and add CORS headers to
+responses for allowed browser origins. `origins === nothing` allows every
+origin; otherwise only exact matches in `origins` are allowed.
+
+An allowed request's `Origin` is echoed back with credentials allowed. Browsers
+reject the `*` wildcard on credentialed requests, so Servo never sends it.
+Preflight responses allow the headers the browser asked for.
+"""
+function cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothing)
     return function(req::HTTP.Request)
+        preflight = req.method == "OPTIONS"
         # answer preflight directly so endpoints never deal with OPTIONS
-        resp = req.method == "OPTIONS" ? HTTP.Response(204) : handler(req)
-        for (k, v) in CORS_HEADERS
-            HTTP.setheader(resp.headers, k => v)
+        resp = preflight ? HTTP.Response(204) : handler(req)
+        # The response depends on Origin even when it is denied, so shared
+        # caches must not reuse it across origins.
+        vary = HTTP.header(resp.headers, "Vary", "")
+        HTTP.setheader(resp.headers, "Vary" => isempty(vary) ? "Origin" : vary * ", Origin")
+        origin = HTTP.header(req.headers, "Origin", "")
+        (isempty(origin) || !(origins === nothing || origin in origins)) && return resp
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => origin)
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Credentials" => "true")
+        if preflight
+            requested = HTTP.header(req.headers, "Access-Control-Request-Headers", "")
+            HTTP.setheader(resp.headers, "Access-Control-Allow-Headers" =>
+                isempty(requested) ? CORS_ALLOW_HEADERS : requested)
+            HTTP.setheader(resp.headers, "Access-Control-Allow-Methods" => CORS_ALLOW_METHODS)
         end
         return resp
     end
@@ -172,7 +202,9 @@ function accesslog_middleware(handler)
     return function(req::HTTP.Request)
         start = time()
         resp = handler(req)
-        @info "$(req.method) $(req.target)" status=resp.status duration_ms=round(Int, (time() - start) * 1000)
+        # The path only: query strings can carry tokens or personal data.
+        path, _ = splittarget(req.target)
+        @info "$(req.method) $path" status=resp.status duration_ms=round(Int, (time() - start) * 1000)
         return resp
     end
 end
@@ -191,6 +223,9 @@ request handler. It can mount a protocol-native handler before Servo routing,
 including handlers that return streaming HTTP response bodies. Servo's CORS and
 access-log middleware wrap the result, so they also cover mounted paths.
 
+`cors` is `false` (no CORS headers), `true` (allow every browser origin), or a
+`Vector{String}` of allowed origins; see [`Servo.cors_middleware`](@ref).
+
 Statically compiled (juliac --trim) deployments should skip `serve!` and serve
 a composed handler through HTTP.jl's request-handler path directly — its
 runtime `cors`/`accesslog` flags make every middleware composition and the
@@ -199,16 +234,18 @@ is not trim-verifiable:
 
     HTTP.serve!(Servo.cors_middleware(Servo.httphandler(router)), host, port)
 
-That path never sees the transport peer, so [`Servo.clientip`](@ref) falls
-back to `X-Forwarded-For` alone.
+That path never sees the transport peer, so set `Servo.CLIENT_IP_HEADER[]` to
+the header your proxy sets (e.g. `"Fly-Client-IP"`); otherwise every client
+shares one public rate-limit bucket.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                middleware=identity, cors::Bool=false, accesslog::Bool=false, kw...)
+                middleware=identity, cors::Union{Bool, Vector{String}}=false,
+                accesslog::Bool=false, kw...)
     handler = middleware(httphandler(router))
     applicable(handler, HTTP.Request("GET", "/")) || throw(ArgumentError(
         "middleware must return a handler callable with an HTTP.Request",
     ))
-    cors && (handler = cors_middleware(handler))
+    cors === false || (handler = cors_middleware(handler, cors === true ? nothing : cors))
     accesslog && (handler = accesslog_middleware(handler))
 
     # Use HTTP.jl's stream server because it exposes the transport peer before

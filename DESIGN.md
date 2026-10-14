@@ -267,7 +267,11 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
   supplies Julia 1.10 support and forwards to Base.ScopedValues on Julia 1.11+.
 - `Public` endpoints skip authentication but get the default **rate limiter**
   installed by `run!`: a token bucket keyed by (endpoint, client IP), configured
-  via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20).
+  via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20). The
+  client IP is the connection's peer address unless `client_ip_header` names a
+  header set by a trusted proxy (`Fly-Client-IP`, or `X-Forwarded-For`, whose
+  last entry is used). Client-sent forwarding headers are never trusted by
+  default, since a forged value would get a fresh bucket per request.
 - `BearerAuth(validator)` implements the shared bearer flow. Servo extracts the
   token with `bearertoken(request)`, then calls
   `authenticatebearer(validator, token, request)`. Its default method invokes
@@ -327,9 +331,13 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
 3. installs the public rate limiter;
 4. registers builtin `GET /status` ("ok") and `GET /version` (the `version`
    config key) unless the app already claimed those routes;
-5. serves HTTP with the error-envelope handler, access logging, and — **only on
-   the `local` profile** — permissive CORS (including OPTIONS preflight,
-   centrally, ending 1.x's per-route OPTIONS registration wart).
+5. serves HTTP with the error-envelope handler, access logging (method and
+   path, never the query string), and CORS for the origins in `cors_origins`.
+   Without that key, the `local` profile allows every origin and other
+   profiles send no CORS headers. Preflight `OPTIONS` is answered centrally,
+   ending 1.x's per-route OPTIONS registration wart. An allowed origin is
+   echoed back with credentials allowed; Servo never sends `*`, which browsers
+   reject on credentialed requests.
 
 ## Fixed from the 1.x lineage
 

@@ -31,8 +31,17 @@ install the public-endpoint rate limiter, register the builtin `/status` and
 `/version` endpoints, and serve the router over HTTP. Returns the server handle
 (non-blocking); use [`Servo.run`](@ref) to block until interrupted.
 
-The `local` profile (the default) enables permissive CORS for browser-based
-development; other profiles do not.
+Config keys read here:
+
+- `cors_origins`: browser origins allowed by CORS, as a list or a
+  comma-separated string. When unset, the `local` profile (the default) allows
+  every origin and other profiles send no CORS headers.
+- `client_ip_header`: the header a trusted proxy sets to the client address
+  (e.g. `Fly-Client-IP`), used to key public rate limiting. When unset, Servo
+  uses the connection's peer address. Behind a proxy, set it, or every client
+  shares one bucket. Only name a header your proxy overwrites, since clients
+  can send any header themselves.
+- `public_ratelimit_rps` / `public_ratelimit_burst`: see [`Servo.RateLimiter`](@ref).
 
 Keywords: `router=Servo.ROUTER`, `host="0.0.0.0"`, `port=nothing` (falls back to
 the `port` config key, then 8080), `configdir=nothing`, `configs=Dict()`,
@@ -59,11 +68,16 @@ function run!(name::AbstractString="Servo", profile::AbstractString="";
         rps=_float(config("public_ratelimit_rps", 5.0)),
         burst=_float(config("public_ratelimit_burst", 20.0)))
     registerbuiltins!(router)
-    cors = prof == "local"
+    CLIENT_IP_HEADER[] = config("client_ip_header", "")
+    origins = config("cors_origins", nothing)
+    cors = origins === nothing ? prof == "local" : _origins(origins)
     server = serve!(router; host, port=p, middleware, cors, accesslog)
     @info "$name listening" profile=prof host port=Servo.port(server) cors endpoints=length(router.endpoints)
     return server
 end
+
+_origins(x::AbstractString) = String[strip(o) for o in split(x, ',') if !isempty(strip(o))]
+_origins(x::AbstractVector) = String[String(o) for o in x]
 
 """
     Servo.run(name="Servo", profile=""; kw...)

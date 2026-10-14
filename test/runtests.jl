@@ -657,9 +657,65 @@ end
         resp = HTTP.get(base * "/transport"; protocol=:h2, status_exception=false)
         @test resp.status == 200
         @test String(resp.body) == "2|127.0.0.1"
+
+        # Client-supplied forwarding headers are ignored unless configured.
+        forged = ["X-Forwarded-For" => "203.0.113.9"]
+        @test String(get("/transport"; headers=forged).body) == "1|127.0.0.1"
+        try
+            # The proxy appends the address it saw; earlier entries are forgeable.
+            Servo.CLIENT_IP_HEADER[] = "X-Forwarded-For"
+            resp = get("/transport"; headers=["X-Forwarded-For" => "203.0.113.9, 198.51.100.7"])
+            @test String(resp.body) == "1|198.51.100.7"
+            Servo.CLIENT_IP_HEADER[] = "Fly-Client-IP"
+            @test String(get("/transport"; headers=["Fly-Client-IP" => "198.51.100.8"]).body) ==
+                "1|198.51.100.8"
+            # A missing header falls back to the transport peer.
+            @test String(get("/transport").body) == "1|127.0.0.1"
+        finally
+            Servo.CLIENT_IP_HEADER[] = ""
+        end
     finally
         close(server)
     end
+end
+
+@testset "CORS and access log middleware" begin
+    ok = req -> HTTP.Response(200, ["Vary" => "Accept-Encoding"], "ok")
+    origin(o) = ["Origin" => o]
+
+    allowlist = Servo.cors_middleware(ok, ["https://app.example.com"])
+    resp = allowlist(HTTP.Request("GET", "/", origin("https://app.example.com")))
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "https://app.example.com"
+    @test HTTP.header(resp, "Access-Control-Allow-Credentials") == "true"
+    @test HTTP.header(resp, "Vary") == "Accept-Encoding, Origin"
+    resp = allowlist(HTTP.Request("GET", "/", origin("https://evil.example.com")))
+    @test resp.status == 200
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
+    @test HTTP.header(resp, "Vary") == "Accept-Encoding, Origin"
+
+    # Preflight is answered without calling the handler and allows the
+    # headers the browser asked for.
+    preflight = HTTP.Request("OPTIONS", "/", [
+        "Origin" => "https://app.example.com",
+        "Access-Control-Request-Headers" => "X-Api-Key, Content-Type",
+    ])
+    resp = allowlist(preflight)
+    @test resp.status == 204
+    @test HTTP.header(resp, "Access-Control-Allow-Headers") == "X-Api-Key, Content-Type"
+    @test occursin("POST", HTTP.header(resp, "Access-Control-Allow-Methods"))
+    resp = allowlist(HTTP.Request("OPTIONS", "/", origin("https://evil.example.com")))
+    @test resp.status == 204
+    @test HTTP.header(resp, "Access-Control-Allow-Methods") == ""
+
+    # Any origin is echoed, never `*`, because browsers reject `*` with credentials.
+    anyorigin = Servo.cors_middleware(ok)
+    resp = anyorigin(HTTP.Request("GET", "/", origin("http://localhost:5173")))
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:5173"
+    @test HTTP.header(anyorigin(HTTP.Request("GET", "/")), "Access-Control-Allow-Origin") == ""
+
+    # The access log records the path but never the query string.
+    logged = Servo.accesslog_middleware(ok)
+    @test_logs (:info, "GET /users/7") logged(HTTP.Request("GET", "/users/7?token=secret"))
 end
 
 @testset "HTTP middleware validation" begin
@@ -720,19 +776,21 @@ end
         @test Servo.config("apikey") == "shh"
         @test Servo.config("missing", "fallback") == "fallback"
         @test JSON.parse(String(HTTP.get(base * "/greet").body)).msg == "hello local"
-        resp = HTTP.get(base * "/run-middleware"; status_exception=false)
+        resp = HTTP.get(base * "/run-middleware"; headers=["Origin" => "http://localhost:3000"],
+                        status_exception=false)
         @test resp.status == 202
         @test String(resp.body) == "run middleware"
-        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:3000"
 
         # builtin endpoints
         @test String(HTTP.get(base * "/status").body) == "ok"
         @test String(HTTP.get(base * "/version").body) == "1.2.3"
 
-        # local profile -> CORS on, preflight answered
-        resp = HTTP.get(base * "/status")
-        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
-        resp = HTTP.request("OPTIONS", base * "/greet"; status_exception=false)
+        # local profile -> CORS on for any origin, preflight answered
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "http://localhost:3000"])
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:3000"
+        resp = HTTP.request("OPTIONS", base * "/greet"; headers=["Origin" => "http://localhost:3000"],
+                            status_exception=false)
         @test resp.status == 204
         @test HTTP.header(resp, "Access-Control-Allow-Methods") != ""
 
@@ -761,7 +819,9 @@ end
     # non-local profile: no CORS, and the configured rate limit is enforced
     r2 = Servo.Router()
     server = Servo.run!("TestApp", "prod"; router=r2, host="127.0.0.1", port=0, configdir,
-                        configs=Dict("public_ratelimit_rps" => 0.1, "public_ratelimit_burst" => 2.0),
+                        configs=Dict("public_ratelimit_rps" => 0.1, "public_ratelimit_burst" => 2.0,
+                                     "cors_origins" => "https://app.example.com, https://admin.example.com",
+                                     "client_ip_header" => "Fly-Client-IP"),
                         accesslog=false, log=false)
     try
         port = Servo.port(server)
@@ -771,11 +831,20 @@ end
         resp = HTTP.get(base * "/status"; status_exception=false)
         @test resp.status == 200
         @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
-        @test HTTP.get(base * "/status"; status_exception=false).status == 200
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "https://admin.example.com"],
+                        status_exception=false)
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "https://admin.example.com"
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "https://evil.example.com"],
+                        status_exception=false)
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
         @test HTTP.get(base * "/status"; status_exception=false).status == 429
+        # the proxy-set client address keys its own bucket
+        @test HTTP.get(base * "/status"; headers=["Fly-Client-IP" => "198.51.100.8"],
+                       status_exception=false).status == 200
     finally
         close(server)
         Servo.PUBLIC_RATE_LIMITER[] = nothing
+        Servo.CLIENT_IP_HEADER[] = ""
     end
 end
 
