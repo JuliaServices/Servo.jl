@@ -292,8 +292,9 @@ Preflight responses allow the headers the browser asked for.
 function cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothing)
     return function(req::HTTP.Request)
         preflight = req.method == "OPTIONS"
-        # answer preflight directly so endpoints never deal with OPTIONS
-        resp = preflight ? HTTP.Response(204) : handler(req)
+        # Answer preflight directly so endpoints never deal with OPTIONS. A
+        # byte-vector body keeps this one of httphandler's three response types.
+        resp = preflight ? HTTP.Response(204, UInt8[]) : handler(req)
         if origins === nothing
             HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => "*")
         else

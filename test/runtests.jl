@@ -848,6 +848,9 @@ end
     @test HTTP.header(anyorigin(HTTP.Request("GET", "/")), "Access-Control-Allow-Origin") == "*"
     resp = anyorigin(HTTP.Request("OPTIONS", "/", origin("https://evil.example.com")))
     @test resp.status == 204
+    # one of httphandler's three response types, so wrapping it keeps the
+    # server's write path statically dispatched under juliac --trim
+    @test resp isa HTTP.Response{Vector{UInt8}}
     @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
     @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
     @test occursin("POST", HTTP.header(resp, "Access-Control-Allow-Methods"))
