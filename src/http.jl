@@ -271,10 +271,9 @@ function errorresponse(ep::Union{Endpoint, Nothing}, e::HTTPError)
     else
         body = message
     end
-    for h in e.headers
-        filter!(x -> lowercase(x.first) != lowercase(h.first), headers)
-        push!(headers, h)
-    end
+    # app headers replace defaults of the same name and may repeat (Set-Cookie)
+    filter!(d -> !any(h -> lowercase(h.first) == lowercase(d.first), e.headers), headers)
+    append!(headers, e.headers)
     return httpresponse(Response(status, body; headers))
 end
 

@@ -716,6 +716,13 @@ HTTP.body_closed(b::EndlessBody) = b.closed
         throw(Servo.HTTPError(401; headers=["WWW-Authenticate" => "Bearer realm=\"x\""],
                               body="{\"error\":\"invalid_token\"}"))
     end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/logout", function logout(req::HTTP.Request)
+        throw(Servo.HTTPError(401; headers=["Set-Cookie" => "session=; Max-Age=0",
+                                            "Set-Cookie" => "csrf=; Max-Age=0",
+                                            "WWW-Authenticate" => "Bearer",
+                                            "WWW-Authenticate" => "Basic realm=\"x\"",
+                                            "Content-Type" => "application/problem+json"]))
+    end; auth=Servo.Public())
     Servo.register!(r, "GET", "/provider", function provider(req::HTTP.Request)
         throw(ProviderDown())
     end; auth=Servo.Public())
@@ -755,6 +762,13 @@ HTTP.body_closed(b::EndlessBody) = b.closed
     @test resp.status == 401
     @test HTTP.header(resp, "WWW-Authenticate") == "Bearer realm=\"x\""
     @test String(resp.body) == "{\"error\":\"invalid_token\"}"
+
+    # repeated app headers all survive; an app header replaces the default
+    resp = handler(HTTP.Request("GET", "/logout"))
+    @test HTTP.headers(resp, "Set-Cookie") == ["session=; Max-Age=0", "csrf=; Max-Age=0"]
+    challenges = join(HTTP.headers(resp, "WWW-Authenticate"), ",")
+    @test occursin("Bearer", challenges) && occursin("Basic", challenges)
+    @test HTTP.headers(resp, "Content-Type") == ["application/problem+json"]
 
     # onerror maps app exceptions and Servo's own errors; nothing keeps the default
     resp = handler(HTTP.Request("GET", "/provider"))
