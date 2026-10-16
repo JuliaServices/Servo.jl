@@ -699,6 +699,14 @@ Servo.authenticate(::KeyHeaderAuth, req::HTTP.Request) =
 
 struct ProviderDown <: Exception end
 
+# a stream that never ends on its own, like an SSE subscription
+mutable struct EndlessBody <: HTTP.AbstractBody
+    closed::Bool
+end
+HTTP.body_read!(b::EndlessBody, dst::Vector{UInt8}) = b.closed ? 0 : (dst[1] = UInt8('.'); 1)
+HTTP.body_close!(b::EndlessBody) = (b.closed = true; nothing)
+HTTP.body_closed(b::EndlessBody) = b.closed
+
 @testset "HTTP errors, native responses, HEAD, and request accessors" begin
     r = Servo.Router()
     Servo.register!(r, "GET", "/typed/{id}", function typed(req::HTTP.Request)
@@ -718,6 +726,9 @@ struct ProviderDown <: Exception end
         HTTP.sse_stream(200) do stream
             write(stream, HTTP.SSEEvent("hi"))
         end
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/endless", function endless(req::HTTP.Request)
+        HTTP.Response(200, EndlessBody(false))
     end; auth=Servo.Public())
     Servo.@GET r "/unlimited" Servo.Public(ratelimit=false) format=Servo.TextFormat() function unlimited()
         "ok"
@@ -768,6 +779,11 @@ struct ProviderDown <: Exception end
 
     # HEAD routes like GET
     @test handler(HTTP.Request("HEAD", "/csv")).status == 201
+    # HEAD closes a streaming body before returning it; HTTP.jl's stream server
+    # would otherwise read an endless body to its end, which never comes
+    resp = handler(HTTP.Request("HEAD", "/endless"))
+    @test resp.status == 200 && HTTP.body_closed(resp.body)
+    @test !HTTP.body_closed(handler(HTTP.Request("GET", "/endless")).body)
 
     # typed endpoints read the raw request through Servo.withrequest
     @test String(handler(HTTP.Request("GET", "/method")).body) == "GET"

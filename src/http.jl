@@ -135,9 +135,9 @@ end
 
 The HTTP request handler for a router: match, `Servo.handle`, and translate
 results/errors into HTTP responses. `HEAD` requests are routed like `GET`
-(HTTP.jl omits the body). Errors are serialized into a stable
-`(; error = (; message, code))` envelope with the endpoint's format (plain text
-when no endpoint was matched).
+(HTTP.jl sends no body; a streaming body is closed before it is returned).
+Errors are serialized into a stable `(; error = (; message, code))` envelope
+with the endpoint's format (plain text when no endpoint was matched).
 
 `onerror(exception, endpoint, request)` runs first for every exception,
 including Servo's own 404/405/401/400 `HTTPError`s, while the backtrace is still
@@ -165,8 +165,12 @@ function httphandler(router::Router; onerror::E=nothing) where {E}
                 throw(HTTPError(405, "$(req.method) not allowed for $path"))
             ep, pathparams = m
             resp = handle(ep, pathparams, req)
-            resp isa NativeResponse && return resp.response::HTTP.Response{StreamBody}
-            return httpresponse(resp)
+            resp isa NativeResponse || return httpresponse(resp)
+            native = resp.response::HTTP.Response{StreamBody}
+            # HTTP.jl's stream server reads a body to its end even for HEAD,
+            # and an endless stream (SSE) has no end: close it up front.
+            req.method == "HEAD" && HTTP.body_close!(native.body)
+            return native
         catch e
             if onerror !== nothing
                 r = onerror(e, ep, req)

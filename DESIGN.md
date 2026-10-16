@@ -196,7 +196,9 @@ one concrete body type that calls the wrapped body's `body_read!`/`body_close!`/
 types and the server's write path stays statically dispatched under juliac
 --trim, streams included.
 
-`HEAD` requests are routed like `GET`; HTTP.jl drops the body.
+`HEAD` requests are routed like `GET`, and HTTP.jl sends no body. A streaming
+body is closed before Servo returns it, since HTTP.jl's stream server would
+otherwise read an endless stream such as SSE forever.
 
 **Trim:** type the handler's request argument, `f(req::HTTP.Request)`, and an
 auth scheme's `authenticate(::MyScheme, req::HTTP.Request)`. `HTTP.Request` is
