@@ -836,11 +836,21 @@ end
     @test resp.status == 204
     @test HTTP.header(resp, "Access-Control-Allow-Methods") == ""
 
-    # Any origin is echoed, never `*`, because browsers reject `*` with credentials.
+    # Allow-all answers `*` without credentials, so browsers don't send cookies
+    # cross-origin and other sites can't read a signed-in user's responses.
     anyorigin = Servo.cors_middleware(ok)
-    resp = anyorigin(HTTP.Request("GET", "/", origin("http://localhost:5173")))
-    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:5173"
-    @test HTTP.header(anyorigin(HTTP.Request("GET", "/")), "Access-Control-Allow-Origin") == ""
+    for o in ("https://evil.example.com", "null")
+        resp = anyorigin(HTTP.Request("GET", "/", origin(o)))
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+        @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
+        @test HTTP.header(resp, "Vary") == "Accept-Encoding"
+    end
+    @test HTTP.header(anyorigin(HTTP.Request("GET", "/")), "Access-Control-Allow-Origin") == "*"
+    resp = anyorigin(HTTP.Request("OPTIONS", "/", origin("https://evil.example.com")))
+    @test resp.status == 204
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+    @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
+    @test occursin("POST", HTTP.header(resp, "Access-Control-Allow-Methods"))
 
     # The access log records the path but never the query string.
     logged = Servo.accesslog_middleware(ok)
@@ -909,15 +919,16 @@ end
                         status_exception=false)
         @test resp.status == 202
         @test String(resp.body) == "run middleware"
-        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:3000"
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
 
         # builtin endpoints
         @test String(HTTP.get(base * "/status").body) == "ok"
         @test String(HTTP.get(base * "/version").body) == "1.2.3"
 
-        # local profile -> CORS on for any origin, preflight answered
+        # local profile -> CORS on for any origin (without credentials), preflight answered
         resp = HTTP.get(base * "/status"; headers=["Origin" => "http://localhost:3000"])
-        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "http://localhost:3000"
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+        @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
         resp = HTTP.request("OPTIONS", base * "/greet"; headers=["Origin" => "http://localhost:3000"],
                             status_exception=false)
         @test resp.status == 204

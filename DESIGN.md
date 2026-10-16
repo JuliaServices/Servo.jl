@@ -375,9 +375,11 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
    path, never the query string), and CORS for the origins in `cors_origins`.
    Without that key, the `local` profile allows every origin and other
    profiles send no CORS headers. Preflight `OPTIONS` is answered centrally,
-   ending 1.x's per-route OPTIONS registration wart. An allowed origin is
-   echoed back with credentials allowed; Servo never sends `*`, which browsers
-   reject on credentialed requests.
+   ending 1.x's per-route OPTIONS registration wart. Allowing every origin
+   sends `Access-Control-Allow-Origin: *` without credentials, so browsers
+   don't send cookies and other sites can't read a signed-in user's data. An
+   origin in `cors_origins` is echoed back with credentials allowed, and those
+   responses carry `Vary: Origin`.
 
 ## Fixed from the 1.x lineage
 

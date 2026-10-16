@@ -33,9 +33,10 @@ install the public-endpoint rate limiter, register the builtin `/status` and
 
 Config keys read here:
 
-- `cors_origins`: browser origins allowed by CORS, as a list or a
-  comma-separated string. When unset, the `local` profile (the default) allows
-  every origin and other profiles send no CORS headers.
+- `cors_origins`: browser origins allowed by CORS (with credentials), as a list
+  or a comma-separated string. When unset, the `local` profile (the default)
+  allows every origin without credentials and other profiles send no CORS
+  headers.
 - `client_ip_header`: the header a trusted proxy sets to the client address
   (e.g. `Fly-Client-IP`), used to key public rate limiting. When unset, Servo
   uses the connection's peer address. Behind a proxy, set it, or every client

@@ -281,11 +281,12 @@ const CORS_ALLOW_METHODS = "GET, POST, PUT, DELETE, PATCH, QUERY, OPTIONS"
     Servo.cors_middleware(handler, origins=nothing)
 
 Answer CORS preflight (`OPTIONS`) requests with a 204 and add CORS headers to
-responses for allowed browser origins. `origins === nothing` allows every
-origin; otherwise only exact matches in `origins` are allowed.
+responses. With `origins === nothing`, every origin may read responses, but
+without credentials (`Access-Control-Allow-Origin: *`), so browsers don't send
+cookies and other sites can't read a signed-in user's data. With a list, only
+exact matches are allowed: an allowed `Origin` is echoed back with credentials
+allowed, and every response carries `Vary: Origin`.
 
-An allowed request's `Origin` is echoed back with credentials allowed. Browsers
-reject the `*` wildcard on credentialed requests, so Servo never sends it.
 Preflight responses allow the headers the browser asked for.
 """
 function cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothing)
@@ -293,14 +294,18 @@ function cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothin
         preflight = req.method == "OPTIONS"
         # answer preflight directly so endpoints never deal with OPTIONS
         resp = preflight ? HTTP.Response(204) : handler(req)
-        # The response depends on Origin even when it is denied, so shared
-        # caches must not reuse it across origins.
-        vary = HTTP.header(resp.headers, "Vary", "")
-        HTTP.setheader(resp.headers, "Vary" => isempty(vary) ? "Origin" : vary * ", Origin")
-        origin = HTTP.header(req.headers, "Origin", "")
-        (isempty(origin) || !(origins === nothing || origin in origins)) && return resp
-        HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => origin)
-        HTTP.setheader(resp.headers, "Access-Control-Allow-Credentials" => "true")
+        if origins === nothing
+            HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => "*")
+        else
+            # The response depends on Origin even when it is denied, so shared
+            # caches must not reuse it across origins.
+            vary = HTTP.header(resp.headers, "Vary", "")
+            HTTP.setheader(resp.headers, "Vary" => isempty(vary) ? "Origin" : vary * ", Origin")
+            origin = HTTP.header(req.headers, "Origin", "")
+            (isempty(origin) || !(origin in origins)) && return resp
+            HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => origin)
+            HTTP.setheader(resp.headers, "Access-Control-Allow-Credentials" => "true")
+        end
         if preflight
             requested = HTTP.header(req.headers, "Access-Control-Request-Headers", "")
             HTTP.setheader(resp.headers, "Access-Control-Allow-Headers" =>
@@ -338,8 +343,9 @@ access-log middleware wrap the result, so they also cover mounted paths.
 
 `onerror` maps exceptions to responses; see [`Servo.httphandler`](@ref).
 
-`cors` is `false` (no CORS headers), `true` (allow every browser origin), or a
-`Vector{String}` of allowed origins; see [`Servo.cors_middleware`](@ref).
+`cors` is `false` (no CORS headers), `true` (every origin, without credentials),
+or a `Vector{String}` of allowed origins (with credentials); see
+[`Servo.cors_middleware`](@ref).
 
 Statically compiled (juliac --trim) deployments should skip `serve!` and serve
 a composed handler through HTTP.jl's request-handler path directly — its
