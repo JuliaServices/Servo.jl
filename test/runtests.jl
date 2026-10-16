@@ -809,6 +809,11 @@ HTTP.body_closed(b::EndlessBody) = b.closed
         resp = handler(HTTP.Request("GET", "/csv"))
         @test resp.status == 429
         @test HTTP.header(resp, "Retry-After") == ""  # a zero rate never refills
+        # a tiny rate caps Retry-After instead of overflowing Int into a 500
+        Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=1e-30, burst=1.0)
+        @test handler(HTTP.Request("GET", "/csv")).status == 201
+        resp = handler(HTTP.Request("GET", "/csv"))
+        @test resp.status == 429 && HTTP.header(resp, "Retry-After") == "86400"
     finally
         Servo.PUBLIC_RATE_LIMITER[] = nothing
     end
