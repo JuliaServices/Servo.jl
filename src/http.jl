@@ -118,10 +118,11 @@ const CLIENT_IP_HEADER = Ref("")
 function clientip(req::HTTP.Request)
     name = CLIENT_IP_HEADER[]
     if !isempty(name)
-        value = HTTP.header(req.headers, name, "")
-        # A proxy appends the address it saw to the end of X-Forwarded-For;
-        # earlier entries come from the client and can be forged.
-        isempty(value) || return String(strip(last(split(value, ','))))
+        # A proxy appends the address it saw to the end of X-Forwarded-For,
+        # sometimes as its own header line; earlier entries and lines come from
+        # the client and can be forged.
+        values = HTTP.headers(req.headers, name)
+        isempty(values) || return String(strip(last(split(last(values), ','))))
     end
     # the context slot is Any-typed; narrowing here keeps `handle`'s client-key
     # conversion statically dispatched under juliac --trim

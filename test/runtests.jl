@@ -679,6 +679,19 @@ end
     end
 end
 
+@testset "client IP: the proxy's appended header line wins" begin
+    # HAProxy's `option forwardfor` adds its own X-Forwarded-For line instead
+    # of extending the client's, so the client's forged line comes first.
+    req = HTTP.Request("GET", "/", ["X-Forwarded-For" => "203.0.113.9", "Accept" => "*/*",
+                                    "X-Forwarded-For" => "198.51.100.7"])
+    try
+        Servo.CLIENT_IP_HEADER[] = "X-Forwarded-For"
+        @test Servo.clientip(req) == "198.51.100.7"
+    finally
+        Servo.CLIENT_IP_HEADER[] = ""
+    end
+end
+
 # a scheme typed on HTTP.Request, as HTTP apps write them
 struct KeyHeaderAuth <: Servo.AuthScheme end
 Servo.authenticate(::KeyHeaderAuth, req::HTTP.Request) =
