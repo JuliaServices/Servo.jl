@@ -124,14 +124,23 @@ A handler may return:
 - `Servo.Response(status, body; headers)` → passed through verbatim (201/302/
   custom content types) — non-trivial endpoints no longer need to abandon the
   macros (the Roam limitation);
-- or throw `Servo.HTTPError(status, msg)` (helpers: `badrequest`, `unauthorized`,
-  `forbidden`, `notfound`). An uncaught `ArgumentError` is a 400 by default, so
-  domain validation can stay independent of Servo. An endpoint can catch it and
-  throw an explicit `HTTPError` to replace that policy. Any other exception logs
-  the backtrace and returns a sanitized 500.
+- or throw `Servo.HTTPError(status, msg; headers, body)` (helpers: `badrequest`,
+  `unauthorized`, `forbidden`, `notfound`). `headers` carry e.g.
+  `WWW-Authenticate` or `Retry-After`; `body` replaces the envelope for clients
+  that expect another error shape (OAuth errors, legacy bodies). An uncaught
+  `ArgumentError` is a 400 by default, so domain validation can stay
+  independent of Servo. An endpoint can catch it and throw an explicit
+  `HTTPError` to replace that policy. Any other exception logs the backtrace
+  and returns a sanitized 500.
 
 Errors serialize into a stable envelope with the endpoint's format:
 `{"error": {"message": ..., "code": ...}}`.
+
+Apps with their own exception types (or their own envelope) pass
+`onerror(exception, endpoint, request) -> Servo.Response | nothing` to
+`httphandler`/`serve!`/`run!`. It sees every exception first, including Servo's
+own 404/405/401/400 `HTTPError`s, inside the `catch` (so `catch_backtrace()`
+works, e.g. for incident alerts); `nothing` keeps the default mapping.
 
 ## Routing
 
@@ -172,18 +181,48 @@ Servo.register!(router, :GET, "/files/**", req -> Servo.Response(200, ...);
 
 The handler gets the raw transport request and returns a `Servo.Response` (or
 `nothing`/a value, serialized with the route's `format`); captures are available
-via `Servo.pathparams()`. No binding, no format negotiation — but **auth is not
-an escape hatch**: raw routes declare `auth` like every other endpoint, public
-ones get the default rate limiting. (Typing the handler's request argument —
-`f(req::HTTP.Request)` — keeps the call trim-verifiable; untyped handlers cost
-one dynamic dispatch.)
+via `Servo.pathparams()`, the whole query via `Servo.query()`. No binding, no
+format negotiation — but **auth is not an escape hatch**: raw routes declare
+`auth` like every other endpoint, public ones get the default rate limiting
+(`Servo.Public(ratelimit=false)` opts a route out, e.g. for internal callers
+that batch).
+
+On HTTP, a raw handler may also return an `HTTP.Response`. Buffered bodies
+(strings, byte vectors) are sent as usual. Any other body, such as an SSE
+stream or a protocol library's own response, is wrapped in a `Servo.StreamBody`:
+one concrete body type that calls the wrapped body's `body_read!`/`body_close!`/
+`body_closed` through function pointers specialized on its type (the
+`HandlerFn` trick again). So `httphandler` returns a closed set of response
+types and the server's write path stays statically dispatched under juliac
+--trim, streams included.
+
+`HEAD` requests are routed like `GET`, and HTTP.jl sends no body. A streaming
+body is closed before Servo returns it, since HTTP.jl's stream server would
+otherwise read an endless stream such as SSE forever.
+
+**Trim:** type the handler's request argument, `f(req::HTTP.Request)`, and an
+auth scheme's `authenticate(::MyScheme, req::HTTP.Request)`. `HTTP.Request` is
+parametric in its body type, so Servo narrows the erased request to the types
+HTTP.jl's server produces (plus in-process requests with a `String` body)
+before calling them; for callees that accept only `HTTP.Request`, the open
+fallback is folded away at compile time. Untyped handlers cost one dynamic
+dispatch.
+
+`httphandler` returns exactly three concrete types: `HTTP.Response{String}`,
+`HTTP.Response{Vector{UInt8}}`, and `HTTP.Response{Servo.StreamBody}`. App
+middleware wrapped around it must keep to that set. A fourth type (for example
+`HTTP.Response(204)`, whose body is `EmptyBody`) widens the server's response
+to the abstract `HTTP.Response`, and the verifier then reports dynamic calls
+inside HTTP.jl's write path, far from the cause. Build extra responses with a
+`String` or `Vector{UInt8}` body (`HTTP.Response(204, UInt8[])`).
 
 ### Migrating from HTTP.Router
 
 - `register!(r, "GET", "/api/thing/{id}", handler)` → same call plus `auth=...`;
-  handlers return `Servo.Response` instead of `HTTP.Response`, read captures
-  from `Servo.pathparams()` instead of `HTTP.getparams(req)` — or better, become
-  bound endpoints and receive typed arguments.
+  handlers can keep returning `HTTP.Response`, read captures from
+  `Servo.pathparams()` instead of `HTTP.getparams(req)` — or better, become
+  bound endpoints and receive typed arguments. Domain code that throws
+  `HTTP.StatusError` maps through `onerror`.
 - `*` positional wildcards (league-easy's `extract_path_param(req, 3)` pattern)
   → name the segment (`{id}`) and take it as an argument; index drift disappears.
 - `{id:[0-9]+}` → `id::Int`.
@@ -267,7 +306,13 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
   supplies Julia 1.10 support and forwards to Base.ScopedValues on Julia 1.11+.
 - `Public` endpoints skip authentication but get the default **rate limiter**
   installed by `run!`: a token bucket keyed by (endpoint, client IP), configured
-  via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20).
+  via `public_ratelimit_rps` / `public_ratelimit_burst` (defaults 5/20), and
+  answering with a 429 and `Retry-After`; `Public(ratelimit=false)` opts an
+  endpoint out. The
+  client IP is the connection's peer address unless `client_ip_header` names a
+  header set by a trusted proxy (`Fly-Client-IP`, or `X-Forwarded-For`, whose
+  last entry is used). Client-sent forwarding headers are never trusted by
+  default, since a forged value would get a fresh bucket per request.
 - `BearerAuth(validator)` implements the shared bearer flow. Servo extracts the
   token with `bearertoken(request)`, then calls
   `authenticatebearer(validator, token, request)`. Its default method invokes
@@ -326,10 +371,17 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
    listener opens;
 3. installs the public rate limiter;
 4. registers builtin `GET /status` ("ok") and `GET /version` (the `version`
-   config key) unless the app already claimed those routes;
-5. serves HTTP with the error-envelope handler, access logging, and — **only on
-   the `local` profile** — permissive CORS (including OPTIONS preflight,
-   centrally, ending 1.x's per-route OPTIONS registration wart).
+   config key) unless the app already claimed those routes or passed
+   `builtins=false`;
+5. serves HTTP with the error-envelope handler, access logging (method and
+   path, never the query string), and CORS for the origins in `cors_origins`.
+   Without that key, the `local` profile allows every origin and other
+   profiles send no CORS headers. Preflight `OPTIONS` is answered centrally,
+   ending 1.x's per-route OPTIONS registration wart. Allowing every origin
+   sends `Access-Control-Allow-Origin: *` without credentials, so browsers
+   don't send cookies and other sites can't read a signed-in user's data. An
+   origin in `cors_origins` is echoed back with credentials allowed, and those
+   responses carry `Vary: Origin`.
 
 ## Fixed from the 1.x lineage
 
@@ -375,5 +427,6 @@ boundary), and one-concrete-source-per-call Figgy loading.
 ## Deliberately deferred
 
 Managed cleanup hooks (DB pools etc.), background/scheduled task registry,
-metrics/observability, streaming responses (SSE), config schemas/validation,
+metrics/observability, transport-neutral streaming responses (raw HTTP handlers
+can stream today), config schemas/validation,
 provider-specific auth schemes, authorization policies, request-id propagation.

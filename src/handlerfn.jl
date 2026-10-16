@@ -68,5 +68,5 @@ function (f::HandlerFn)(pathparams::Dict{Symbol, String}, query::Dict{String, St
     GC.@preserve call begin
         ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, pointer_from_objref(call))
     end
-    return call.result::Response
+    return call.result::Union{Response, NativeResponse}
 end

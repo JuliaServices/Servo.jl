@@ -657,9 +657,242 @@ end
         resp = HTTP.get(base * "/transport"; protocol=:h2, status_exception=false)
         @test resp.status == 200
         @test String(resp.body) == "2|127.0.0.1"
+
+        # Client-supplied forwarding headers are ignored unless configured.
+        forged = ["X-Forwarded-For" => "203.0.113.9"]
+        @test String(get("/transport"; headers=forged).body) == "1|127.0.0.1"
+        try
+            # The proxy appends the address it saw; earlier entries are forgeable.
+            Servo.CLIENT_IP_HEADER[] = "X-Forwarded-For"
+            resp = get("/transport"; headers=["X-Forwarded-For" => "203.0.113.9, 198.51.100.7"])
+            @test String(resp.body) == "1|198.51.100.7"
+            Servo.CLIENT_IP_HEADER[] = "Fly-Client-IP"
+            @test String(get("/transport"; headers=["Fly-Client-IP" => "198.51.100.8"]).body) ==
+                "1|198.51.100.8"
+            # A missing header falls back to the transport peer.
+            @test String(get("/transport").body) == "1|127.0.0.1"
+        finally
+            Servo.CLIENT_IP_HEADER[] = ""
+        end
     finally
         close(server)
     end
+end
+
+@testset "client IP: the proxy's appended header line wins" begin
+    # HAProxy's `option forwardfor` adds its own X-Forwarded-For line instead
+    # of extending the client's, so the client's forged line comes first.
+    req = HTTP.Request("GET", "/", ["X-Forwarded-For" => "203.0.113.9", "Accept" => "*/*",
+                                    "X-Forwarded-For" => "198.51.100.7"])
+    try
+        Servo.CLIENT_IP_HEADER[] = "X-Forwarded-For"
+        @test Servo.clientip(req) == "198.51.100.7"
+    finally
+        Servo.CLIENT_IP_HEADER[] = ""
+    end
+end
+
+# a scheme typed on HTTP.Request, as HTTP apps write them
+struct KeyHeaderAuth <: Servo.AuthScheme end
+Servo.authenticate(::KeyHeaderAuth, req::HTTP.Request) =
+    HTTP.header(req.headers, "X-Key", "") == "k" ? "key-user" : nothing
+
+struct ProviderDown <: Exception end
+
+# a stream that never ends on its own, like an SSE subscription
+mutable struct EndlessBody <: HTTP.AbstractBody
+    closed::Bool
+end
+HTTP.body_read!(b::EndlessBody, dst::Vector{UInt8}) = b.closed ? 0 : (dst[1] = UInt8('.'); 1)
+HTTP.body_close!(b::EndlessBody) = (b.closed = true; nothing)
+HTTP.body_closed(b::EndlessBody) = b.closed
+
+@testset "HTTP errors, native responses, HEAD, and request accessors" begin
+    r = Servo.Router()
+    Servo.register!(r, "GET", "/typed/{id}", function typed(req::HTTP.Request)
+        Servo.Response(200, "$(Servo.pathparams()[:id]):$(Servo.principal()):$(Servo.query()["q"])")
+    end; auth=KeyHeaderAuth())
+    Servo.register!(r, "GET", "/challenge", function challenge(req::HTTP.Request)
+        throw(Servo.HTTPError(401; headers=["WWW-Authenticate" => "Bearer realm=\"x\""],
+                              body="{\"error\":\"invalid_token\"}"))
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/logout", function logout(req::HTTP.Request)
+        throw(Servo.HTTPError(401; headers=["Set-Cookie" => "session=; Max-Age=0",
+                                            "Set-Cookie" => "csrf=; Max-Age=0",
+                                            "WWW-Authenticate" => "Bearer",
+                                            "WWW-Authenticate" => "Basic realm=\"x\"",
+                                            "Content-Type" => "application/problem+json"]))
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/provider", function provider(req::HTTP.Request)
+        throw(ProviderDown())
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/csv", function csv(req::HTTP.Request)
+        HTTP.Response(201, ["Content-Disposition" => "attachment"], Vector{UInt8}("a,b"))
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/events", function events(req::HTTP.Request)
+        HTTP.sse_stream(200) do stream
+            write(stream, HTTP.SSEEvent("hi"))
+        end
+    end; auth=Servo.Public())
+    Servo.register!(r, "GET", "/endless", function endless(req::HTTP.Request)
+        HTTP.Response(200, EndlessBody(false))
+    end; auth=Servo.Public())
+    Servo.@GET r "/unlimited" Servo.Public(ratelimit=false) format=Servo.TextFormat() function unlimited()
+        "ok"
+    end
+    Servo.@GET r "/method" public format=Servo.TextFormat() function method()
+        Servo.withrequest((req::HTTP.Request) -> req.method)
+    end
+
+    onerror = function (e, ep, req)
+        e isa ProviderDown && return Servo.Response(502, "provider down")
+        e isa Servo.HTTPError && e.status == 404 && return Servo.Response(404, "{}"; headers=["Content-Type" => "application/json"])
+        return nothing
+    end
+    handler = Servo.httphandler(r; onerror)
+
+    # HTTP.Request-typed raw handlers and auth schemes, plus Servo.query()
+    resp = handler(HTTP.Request("GET", "/typed/7?q=hi", ["X-Key" => "k"]))
+    @test resp.status == 200 && String(resp.body) == "7:key-user:hi"
+    @test handler(HTTP.Request("GET", "/typed/7?q=hi", ["X-Key" => "k"], "with body")).status == 200
+    @test handler(HTTP.Request("GET", "/typed/7")).status == 401
+
+    # HTTPError headers and verbatim body
+    resp = handler(HTTP.Request("GET", "/challenge"))
+    @test resp.status == 401
+    @test HTTP.header(resp, "WWW-Authenticate") == "Bearer realm=\"x\""
+    @test String(resp.body) == "{\"error\":\"invalid_token\"}"
+
+    # repeated app headers all survive; an app header replaces the default
+    resp = handler(HTTP.Request("GET", "/logout"))
+    @test HTTP.headers(resp, "Set-Cookie") == ["session=; Max-Age=0", "csrf=; Max-Age=0"]
+    challenges = join(HTTP.headers(resp, "WWW-Authenticate"), ",")
+    @test occursin("Bearer", challenges) && occursin("Basic", challenges)
+    @test HTTP.headers(resp, "Content-Type") == ["application/problem+json"]
+
+    # onerror maps app exceptions and Servo's own errors; nothing keeps the default
+    resp = handler(HTTP.Request("GET", "/provider"))
+    @test resp.status == 502 && String(resp.body) == "provider down"
+    resp = handler(HTTP.Request("GET", "/nope"))
+    @test resp.status == 404 && String(resp.body) == "{}"
+    @test handler(HTTP.Request("POST", "/csv")).status == 405
+
+    # a buffered HTTP.Response passes through; a streaming one is wrapped in a
+    # StreamBody that reads and closes the original stream
+    resp = handler(HTTP.Request("GET", "/csv"))
+    @test resp.status == 201 && String(resp.body) == "a,b"
+    @test HTTP.header(resp, "Content-Disposition") == "attachment"
+    resp = handler(HTTP.Request("GET", "/events"))
+    @test resp.status == 200 && resp.body isa Servo.StreamBody
+    @test HTTP.header(resp, "Content-Type") == "text/event-stream"
+    buf = Vector{UInt8}(undef, 64)
+    n = HTTP.body_read!(resp.body, buf)
+    @test String(buf[1:n]) == "data: hi\n\n"
+    HTTP.body_close!(resp.body)
+    @test HTTP.body_closed(resp.body)
+
+    # HEAD routes like GET
+    @test handler(HTTP.Request("HEAD", "/csv")).status == 201
+    # HEAD closes a streaming body before returning it; HTTP.jl's stream server
+    # would otherwise read an endless body to its end, which never comes
+    resp = handler(HTTP.Request("HEAD", "/endless"))
+    @test resp.status == 200 && HTTP.body_closed(resp.body)
+    @test !HTTP.body_closed(handler(HTTP.Request("GET", "/endless")).body)
+
+    # typed endpoints read the raw request through Servo.withrequest
+    @test String(handler(HTTP.Request("GET", "/method")).body) == "GET"
+
+    # Public(ratelimit=false) skips the public rate limiter
+    try
+        Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=0.0, burst=0.0)
+        @test handler(HTTP.Request("GET", "/unlimited")).status == 200
+        resp = handler(HTTP.Request("GET", "/csv"))
+        @test resp.status == 429
+        @test HTTP.header(resp, "Retry-After") == ""  # a zero rate never refills
+        # a tiny rate caps Retry-After instead of overflowing Int into a 500
+        Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=1e-30, burst=1.0)
+        @test handler(HTTP.Request("GET", "/csv")).status == 201
+        resp = handler(HTTP.Request("GET", "/csv"))
+        @test resp.status == 429 && HTTP.header(resp, "Retry-After") == "86400"
+    finally
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+
+    @test Servo.header(Servo.Response(200, "x"; headers=["Content-Type" => "text/plain"]), "content-type") == "text/plain"
+    @test Servo.header(Servo.Response(200), "ETag", "none") == "none"
+
+    # over a real server, through both serve! and a plain HTTP.serve!:
+    # streams arrive intact, HEAD has no body
+    plain = HTTP.serve!(handler, "127.0.0.1", 0)
+    try
+        resp = HTTP.get("http://127.0.0.1:$(HTTP.port(plain))/events")
+        @test resp.status == 200 && String(resp.body) == "data: hi\n\n"
+    finally
+        close(plain)
+    end
+    server = Servo.serve!(r; host="127.0.0.1", port=0, onerror)
+    try
+        base = "http://127.0.0.1:$(Servo.port(server))"
+        resp = HTTP.get(base * "/events")
+        @test resp.status == 200 && String(resp.body) == "data: hi\n\n"
+        resp = HTTP.request("HEAD", base * "/csv")
+        @test resp.status == 201 && isempty(resp.body)
+        @test HTTP.get(base * "/provider"; status_exception=false).status == 502
+    finally
+        close(server)
+    end
+end
+
+@testset "CORS and access log middleware" begin
+    ok = req -> HTTP.Response(200, ["Vary" => "Accept-Encoding"], "ok")
+    origin(o) = ["Origin" => o]
+
+    allowlist = Servo.cors_middleware(ok, ["https://app.example.com"])
+    resp = allowlist(HTTP.Request("GET", "/", origin("https://app.example.com")))
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "https://app.example.com"
+    @test HTTP.header(resp, "Access-Control-Allow-Credentials") == "true"
+    @test HTTP.header(resp, "Vary") == "Accept-Encoding, Origin"
+    resp = allowlist(HTTP.Request("GET", "/", origin("https://evil.example.com")))
+    @test resp.status == 200
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
+    @test HTTP.header(resp, "Vary") == "Accept-Encoding, Origin"
+
+    # Preflight is answered without calling the handler and allows the
+    # headers the browser asked for.
+    preflight = HTTP.Request("OPTIONS", "/", [
+        "Origin" => "https://app.example.com",
+        "Access-Control-Request-Headers" => "X-Api-Key, Content-Type",
+    ])
+    resp = allowlist(preflight)
+    @test resp.status == 204
+    @test HTTP.header(resp, "Access-Control-Allow-Headers") == "X-Api-Key, Content-Type"
+    @test occursin("POST", HTTP.header(resp, "Access-Control-Allow-Methods"))
+    resp = allowlist(HTTP.Request("OPTIONS", "/", origin("https://evil.example.com")))
+    @test resp.status == 204
+    @test HTTP.header(resp, "Access-Control-Allow-Methods") == ""
+
+    # Allow-all answers `*` without credentials, so browsers don't send cookies
+    # cross-origin and other sites can't read a signed-in user's responses.
+    anyorigin = Servo.cors_middleware(ok)
+    for o in ("https://evil.example.com", "null")
+        resp = anyorigin(HTTP.Request("GET", "/", origin(o)))
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+        @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
+        @test HTTP.header(resp, "Vary") == "Accept-Encoding"
+    end
+    @test HTTP.header(anyorigin(HTTP.Request("GET", "/")), "Access-Control-Allow-Origin") == "*"
+    resp = anyorigin(HTTP.Request("OPTIONS", "/", origin("https://evil.example.com")))
+    @test resp.status == 204
+    # one of httphandler's three response types, so wrapping it keeps the
+    # server's write path statically dispatched under juliac --trim
+    @test resp isa HTTP.Response{Vector{UInt8}}
+    @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
+    @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
+    @test occursin("POST", HTTP.header(resp, "Access-Control-Allow-Methods"))
+
+    # The access log records the path but never the query string.
+    logged = Servo.accesslog_middleware(ok)
+    @test_logs (:info, "GET /users/7") logged(HTTP.Request("GET", "/users/7?token=secret"))
 end
 
 @testset "HTTP middleware validation" begin
@@ -720,7 +953,8 @@ end
         @test Servo.config("apikey") == "shh"
         @test Servo.config("missing", "fallback") == "fallback"
         @test JSON.parse(String(HTTP.get(base * "/greet").body)).msg == "hello local"
-        resp = HTTP.get(base * "/run-middleware"; status_exception=false)
+        resp = HTTP.get(base * "/run-middleware"; headers=["Origin" => "http://localhost:3000"],
+                        status_exception=false)
         @test resp.status == 202
         @test String(resp.body) == "run middleware"
         @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
@@ -729,15 +963,28 @@ end
         @test String(HTTP.get(base * "/status").body) == "ok"
         @test String(HTTP.get(base * "/version").body) == "1.2.3"
 
-        # local profile -> CORS on, preflight answered
-        resp = HTTP.get(base * "/status")
+        # local profile -> CORS on for any origin (without credentials), preflight answered
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "http://localhost:3000"])
         @test HTTP.header(resp, "Access-Control-Allow-Origin") == "*"
-        resp = HTTP.request("OPTIONS", base * "/greet"; status_exception=false)
+        @test HTTP.header(resp, "Access-Control-Allow-Credentials") == ""
+        resp = HTTP.request("OPTIONS", base * "/greet"; headers=["Origin" => "http://localhost:3000"],
+                            status_exception=false)
         @test resp.status == 204
         @test HTTP.header(resp, "Access-Control-Allow-Methods") != ""
 
         # run! installed the public rate limiter
         @test Servo.PUBLIC_RATE_LIMITER[] isa Servo.RateLimiter
+    finally
+        close(server)
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+
+    # builtins=false leaves /status and /version to the app
+    r3 = Servo.Router()
+    server = Servo.run!("TestApp", "prod"; router=r3, host="127.0.0.1", port=0, configdir,
+                        builtins=false, accesslog=false, log=false)
+    try
+        @test isempty(r3.endpoints)
     finally
         close(server)
         Servo.PUBLIC_RATE_LIMITER[] = nothing
@@ -761,7 +1008,9 @@ end
     # non-local profile: no CORS, and the configured rate limit is enforced
     r2 = Servo.Router()
     server = Servo.run!("TestApp", "prod"; router=r2, host="127.0.0.1", port=0, configdir,
-                        configs=Dict("public_ratelimit_rps" => 0.1, "public_ratelimit_burst" => 2.0),
+                        configs=Dict("public_ratelimit_rps" => 0.01, "public_ratelimit_burst" => 2.0,
+                                     "cors_origins" => "https://app.example.com, https://admin.example.com",
+                                     "client_ip_header" => "Fly-Client-IP"),
                         accesslog=false, log=false)
     try
         port = Servo.port(server)
@@ -771,11 +1020,23 @@ end
         resp = HTTP.get(base * "/status"; status_exception=false)
         @test resp.status == 200
         @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
-        @test HTTP.get(base * "/status"; status_exception=false).status == 200
-        @test HTTP.get(base * "/status"; status_exception=false).status == 429
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "https://admin.example.com"],
+                        status_exception=false)
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == "https://admin.example.com"
+        resp = HTTP.get(base * "/status"; headers=["Origin" => "https://evil.example.com"],
+                        status_exception=false)
+        @test HTTP.header(resp, "Access-Control-Allow-Origin") == ""
+        # retry=false: the client would otherwise honor Retry-After and wait
+        resp = HTTP.get(base * "/status"; status_exception=false, retry=false)
+        @test resp.status == 429
+        @test HTTP.header(resp, "Retry-After") == "100"
+        # the proxy-set client address keys its own bucket
+        @test HTTP.get(base * "/status"; headers=["Fly-Client-IP" => "198.51.100.8"],
+                       status_exception=false).status == 200
     finally
         close(server)
         Servo.PUBLIC_RATE_LIMITER[] = nothing
+        Servo.CLIENT_IP_HEADER[] = ""
     end
 end
 
