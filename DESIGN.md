@@ -312,7 +312,9 @@ macro-expansion time, i.e. when the app package is loaded/precompiled. The
   client IP is the connection's peer address unless `client_ip_header` names a
   header set by a trusted proxy (`Fly-Client-IP`, or `X-Forwarded-For`, whose
   last entry is used). Client-sent forwarding headers are never trusted by
-  default, since a forged value would get a fresh bucket per request.
+  default, since a forged value would get a fresh bucket per request. For the
+  same reason an IPv6 client is keyed by its /64 prefix: it can usually send
+  from any address in that prefix.
 - `BearerAuth(validator)` implements the shared bearer flow. Servo extracts the
   token with `bearertoken(request)`, then calls
   `authenticatebearer(validator, token, request)`. Its default method invokes

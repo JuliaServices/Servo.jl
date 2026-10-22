@@ -8,8 +8,9 @@ end
 
 Per-key token-bucket rate limiter: each key accrues `rps` tokens per second up to
 `burst`, and each request spends one. `Servo.run!` installs one of these over all
-[`Public`](@ref) endpoints, keyed by (endpoint, client IP), configurable via the
-`public_ratelimit_rps` / `public_ratelimit_burst` config keys.
+[`Public`](@ref) endpoints, keyed by (endpoint, client address), configurable via the
+`public_ratelimit_rps` / `public_ratelimit_burst` config keys. IPv6 clients are
+keyed by their /64 prefix (see [`Servo.ratelimitkey`](@ref)).
 
 Both settings must be finite and nonnegative. A zero rate spends the initial
 burst without refilling; a burst below one rejects every request. Refilling uses
@@ -68,10 +69,29 @@ end
 # set by `run!`; nothing disables public rate limiting (e.g. bare `serve!` in tests)
 const PUBLIC_RATE_LIMITER = Ref{Union{RateLimiter, Nothing}}(nothing)
 
+"""
+    Servo.ratelimitkey(client::String) -> String
+
+The public rate limiter's key for a client address. An IPv6 client usually
+holds a whole /64 and can send from any address in it, so IPv6 addresses are
+keyed by their /64 prefix; IPv4-mapped IPv6 addresses count as their IPv4
+address. Other values (IPv4 addresses, `""`) are used unchanged.
+"""
+function ratelimitkey(client::String)
+    occursin(':', client) || return client
+    ip = try
+        parse(Sockets.IPv6, first(split(client, '%'; limit=2))) # drop a zone index
+    catch
+        return client
+    end
+    ip.host >> 32 == 0xffff && return string(Sockets.IPv4(UInt32(ip.host & 0xffffffff)))
+    return string(Sockets.IPv6(ip.host & ~(UInt128(1) << 64 - 1)), "/64")
+end
+
 function checkratelimit!(name::String, client::String)
     rl = PUBLIC_RATE_LIMITER[]
     rl === nothing && return
-    allow!(rl, (name, client)) && return
+    allow!(rl, (name, ratelimitkey(client))) && return
     # ponytail: time to refill one whole token, an upper bound on the wait;
     # capped at a day so a tiny rate can't overflow Int
     headers = rl.rps > 0 ? ["Retry-After" => string(ceil(Int, min(1 / rl.rps, 86400.0)))] : Pair{String, String}[]

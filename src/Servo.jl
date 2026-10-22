@@ -2,9 +2,9 @@ module Servo
 
 using Logging
 using ScopedValues: ScopedValue, @with
-import Figgy, HTTP
+import Figgy, HTTP, Sockets
 
-# core interface: these files only use Base
+# core interface: these files only use Base and stdlibs
 include("errors.jl")
 include("formats.jl")
 include("auth.jl")

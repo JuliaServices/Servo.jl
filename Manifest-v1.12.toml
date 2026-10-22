@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "47217d11e91961cc24f9a2a80b2588e3be0ceab8"
+project_hash = "0a9ac7122c605fd0bd5988944a28df6e49e84f16"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -101,10 +101,10 @@ uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
 version = "1.6.2"
 
 [[deps.Servo]]
-deps = ["Figgy", "HTTP", "Logging", "ScopedValues"]
+deps = ["Figgy", "HTTP", "Logging", "ScopedValues", "Sockets"]
 path = "."
 uuid = "169596a4-850b-412e-9996-453439081821"
-version = "2.0.0"
+version = "2.1.0"
 
     [deps.Servo.extensions]
     ServoJSONExt = "JSON"
@@ -113,6 +113,10 @@ version = "2.0.0"
     [deps.Servo.weakdeps]
     JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
     OpenAPI = "d5e62ea6-ddf3-4d43-8e4c-ad5e6c8bfd7d"
+
+[[deps.Sockets]]
+uuid = "6462fe0b-24de-5631-8697-dd941f90decc"
+version = "1.11.0"
 
 [[deps.TOML]]
 deps = ["Dates"]

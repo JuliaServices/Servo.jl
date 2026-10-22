@@ -66,3 +66,22 @@
     @test count(identity, fetch.(tasks)) == 64
     @test !Servo.allow!(rl, key)
 end
+
+@testset "IPv6 clients share one bucket per /64" begin
+    key = Servo.ratelimitkey
+    @test key("203.0.113.9") == "203.0.113.9"
+    @test key("") == ""
+    @test key("2001:db8:1:2:aaaa::1") == key("2001:db8:1:2:bbbb:cccc:dddd:eeee") == "2001:db8:1:2::/64"
+    @test key("2001:db8:1:2::1") != key("2001:db8:1:3::1")
+    @test key("::ffff:203.0.113.9") == "203.0.113.9"
+    @test key("fe80::1%en0") == key("fe80::2")
+    @test key("not:an:address") == "not:an:address"
+    try
+        Servo.PUBLIC_RATE_LIMITER[] = Servo.RateLimiter(; rps=0.0, burst=1.0)
+        Servo.checkratelimit!("endpoint", "2001:db8::1")
+        @test_throws Servo.HTTPError Servo.checkratelimit!("endpoint", "2001:db8::2")
+        Servo.checkratelimit!("endpoint", "2001:db8:0:1::1")
+    finally
+        Servo.PUBLIC_RATE_LIMITER[] = nothing
+    end
+end
