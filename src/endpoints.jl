@@ -22,7 +22,17 @@ struct Param
 end
 
 const METHODS = (:GET, :POST, :PUT, :DELETE, :PATCH, :QUERY)
+const METHOD_NAMES = map(String, METHODS)
 const BODYLESS_METHODS = (:GET, :DELETE)  # QUERY carries a request body by design
+
+# The route method for a request's method name. Client input is never turned
+# into a Symbol: Symbols are never freed, so each new method name a client sent
+# would stay in memory for good. Names outside `METHODS` map to `:UNROUTABLE`,
+# which no endpoint can have (405 when the path matches, 404 otherwise).
+function routemethod(method::AbstractString)
+    i = findfirst(==(method), METHOD_NAMES)
+    return i === nothing ? :UNROUTABLE : METHODS[i]
+end
 
 """
     Servo.Segment
