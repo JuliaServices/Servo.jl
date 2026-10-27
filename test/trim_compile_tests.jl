@@ -17,7 +17,8 @@ const _TRIM_UPSTREAM_PATTERNS = [
 
 const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
 const _TRIM_PRE_RELEASE = !isempty(VERSION.prerelease)
-const _TRIM_COMPILE_TIMEOUT_S = Sys.iswindows() ? 900.0 : 300.0
+# macOS x64 runners have taken over 300 s to build each workload.
+const _TRIM_COMPILE_TIMEOUT_S = Sys.iswindows() ? 900.0 : 600.0
 const _TRIM_EXECUTABLE_TIMEOUT_S = Sys.iswindows() ? 120.0 : 30.0
 const _TRIM_USE_BUNDLE = Sys.iswindows()
 const _JULIAC_ENTRYPOINT_EXPR = "using JuliaC; if isdefined(JuliaC, :main); JuliaC.main(ARGS); else JuliaC._main_cli(ARGS); end"
