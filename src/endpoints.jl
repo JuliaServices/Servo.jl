@@ -58,7 +58,7 @@ placeholdersyms(segments::Vector{Segment}) =
     Symbol[s.sym for s in segments if (s.kind === :capture || s.kind === :catchall) && !isempty(s.text)]
 
 """
-    Servo.Endpoint(; method, path, target, params=Param[], auth, name="", format=JSONFormat())
+    Servo.Endpoint(; method, path, target, params=Param[], auth, name="", format=JSONFormat(), returns=nothing)
 
 One unit of exposed functionality: an addressable `method` + `path` routed to a
 `target` function, with `params` describing how transport data binds to the
@@ -66,7 +66,8 @@ function's arguments, a mandatory `auth` scheme, and a `format` for payload
 (de)serialization.
 
 Endpoints are plain, introspectable values — the route table is real data that
-tooling (docs, API catalogs, client/tool generation) can walk.
+tooling (docs, API catalogs, client/tool generation) can walk. `returns` is the
+target's declared return type, if it has one; the endpoint macros record it.
 
 All structural validation happens here, at construction time (i.e. when your app
 loads): unknown methods, malformed paths, path/argument mismatches, misplaced body
@@ -96,6 +97,7 @@ struct Endpoint
     params::Vector{Param}
     target::Any   # introspection only; requests are invoked through `handler`
     binder::Any   # nothing for raw routes; otherwise introspection/inference (invoked inside `handler`)
+    returns::Any  # the target's declared return type, or nothing; introspection only
     auth::AuthScheme
     format::Format
     handler::HandlerFn
@@ -145,7 +147,8 @@ end
 
 function Endpoint(; method::Symbol, path::AbstractString, target,
                     params::Vector{Param}=Param[], auth=nothing, binder=nothing,
-                    rawhandler=nothing, name::AbstractString="", format::Format=JSONFormat())
+                    rawhandler=nothing, name::AbstractString="", format::Format=JSONFormat(),
+                    returns=nothing)
     auth === nothing && throw(ArgumentError(
         "endpoint `$method $path` does not declare an auth scheme: pass `auth=Servo.Public()` " *
         "to explicitly expose it without authentication, or provide a `Servo.AuthScheme`"))
@@ -162,12 +165,12 @@ function Endpoint(; method::Symbol, path::AbstractString, target,
             "endpoint `$method $path`: `binder` and `rawhandler` are mutually exclusive"))
         rh = rawhandler isa RawFn ? rawhandler : RawFn(rawhandler)
         handler = HandlerFn(RawHandler(nm, rh, auth, format))
-        return Endpoint(nm, method, String(path), segments, params, target, nothing, auth, format, handler)
+        return Endpoint(nm, method, String(path), segments, params, target, nothing, returns, auth, format, handler)
     end
     b = binder === nothing ? GenericBinder(target, params) :
         (binder isa Binder || binder isa GenericBinder) ? binder : Binder(binder)
     handler = HandlerFn(RequestHandler(nm, b, auth, format))
-    return Endpoint(nm, method, String(path), segments, params, target, b, auth, format, handler)
+    return Endpoint(nm, method, String(path), segments, params, target, b, returns, auth, format, handler)
 end
 
 # "/users/{id}/files/{path...}" -> [literal "users", capture :id, literal "files", catchall :path]

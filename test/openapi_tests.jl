@@ -17,11 +17,16 @@ Servo.@POST DOC_ROUTER "/widgets" public format=Servo.JSONFormat() function open
     return w
 end
 
+# Always throws here, so inference finds no return type; the declared one is used.
+Servo.@PUT DOC_ROUTER "/widgets/{id}" public function openapi_replacewidget(id::Int, w::DocWidget)::DocWidget
+    throw(Servo.HTTPError(503, "replacing widgets is switched off"))
+end
+
 @testset "OpenAPI document generation from a Servo router" begin
     operations = OpenAPI.operations(DOC_ROUTER)
-    @test length(operations) == 2
+    @test length(operations) == 3
     @test Set(op.id for op in operations) ==
-          Set(["openapi_getwidget", "openapi_addwidget"])
+          Set(["openapi_getwidget", "openapi_addwidget", "openapi_replacewidget"])
 
     document = OpenAPI.document(DOC_ROUTER; title = "Doc", version = "1.2.3")
     @test document["info"]["title"] == "Doc"
@@ -32,6 +37,8 @@ end
     @test ("id", "path") in names
     @test ("verbose", "query") in names
     @test haskey(document["components"]["schemas"], "DocWidget")
+    replaced = document["paths"]["/widgets/{id}"]["put"]["responses"]["200"]
+    @test replaced["content"]["application/json"]["schema"]["\$ref"] == "#/components/schemas/DocWidget"
 
     OpenAPI.register!(DOC_ROUTER; title = "Doc", version = "1.2.3")
     server = Servo.serve!(DOC_ROUTER; host = "127.0.0.1", port = 0)

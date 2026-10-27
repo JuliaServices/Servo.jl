@@ -33,11 +33,14 @@ function inferresponse(ep::Servo.Endpoint)
         Base.return_types(ep.binder,
             Tuple{typeof(ep.format), Dict{Symbol, String}, Dict{String, String}, Vector{UInt8}})
     catch
-        return nothing
+        Any[]
     end
-    length(ts) == 1 || return nothing
-    t = ts[1]
-    (t === Union{} || t === Any || t <: Servo.Response) && return nothing
+    t = length(ts) == 1 ? ts[1] : nothing
+    # A body that always throws where it was registered (a feature that is switched
+    # off, say) infers as `Union{}`; the declared return type still says what the
+    # endpoint answers when it succeeds.
+    (t === nothing || t === Union{}) && (t = ep.returns)
+    (t === nothing || t === Union{} || t === Any || t <: Servo.Response) && return nothing
     return t
 end
 
@@ -48,7 +51,8 @@ Describe a router's endpoints as framework-neutral [`OpenAPI.Operation`](@ref)s:
 path/query/body binding comes from each endpoint's `params`, the content type
 from its `format`, the security flag from its auth scheme (`Public` or not), and
 the response schema from best-effort return-type inference of its binder (raw
-handlers report an unknown response). Endpoints whose name is in `skip` are
+handlers report an unknown response). When inference finds that the endpoint
+always throws, its function's declared return type is used instead. Endpoints whose name is in `skip` are
 omitted (by default the `/openapi.json` discovery endpoint itself).
 
 Path templates are rebuilt from the parsed route pattern, so a named catch-all

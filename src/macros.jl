@@ -12,12 +12,17 @@ ParamSpec(name, type, source, required) = ParamSpec(name, type, source, required
 
 function parsesignature(funcdef, placeholders::Vector{Symbol})
     sig = nothing
+    returns = nothing
     if funcdef isa Expr && funcdef.head == :function
         sig = funcdef.args[1]
     elseif funcdef isa Expr && funcdef.head == :(=)
         sig = funcdef.args[1]
     end
-    # unwrap return-type annotations and where clauses
+    # unwrap return-type annotations and where clauses; keep the return type unless a
+    # `where` clause encloses it, since it may name that clause's parameters
+    if sig isa Expr && sig.head == :(::)
+        returns = sig.args[2]
+    end
     while sig isa Expr && sig.head in (:(::), :where)
         sig = sig.args[1]
     end
@@ -39,7 +44,7 @@ function parsesignature(funcdef, placeholders::Vector{Symbol})
     for a in kwexprs
         push!(specs, keywordspec(a))
     end
-    return fname, specs
+    return fname, specs, returns
 end
 
 argname(a) = a isa Symbol ? a :
@@ -105,7 +110,7 @@ function endpointexpr(method::Symbol, args...)
         "explicitly `public` or provide a `Servo.AuthScheme`, e.g. " *
         "`Servo.@$method \"$path\" public function ... end`"))
     placeholders = placeholdersyms(parsepattern(path))
-    fname, specs = parsesignature(funcdef, placeholders)
+    fname, specs, returns = parsesignature(funcdef, placeholders)
     paramexprs = [:(Servo.Param($(QuoteNode(s.name)), $(esc(s.type)), $(QuoteNode(s.source)), $(s.required)))
                   for s in specs]
     # `target` is a single-assignment `let` binding: closures capturing it stay
@@ -121,6 +126,7 @@ function endpointexpr(method::Symbol, args...)
                 target = target,
                 params = Servo.Param[$(paramexprs...)],
                 binder = Servo.Binder($(binderexpr(specs))),
+                returns = $(returns === nothing ? nothing : esc(returns)),
                 auth = $authex,
                 format = $formatex,
             )
