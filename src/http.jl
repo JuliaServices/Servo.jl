@@ -292,43 +292,60 @@ allowed, and every response carries `Vary: Origin`.
 
 Preflight responses allow the headers the browser asked for.
 """
-function cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothing)
-    return function(req::HTTP.Request)
-        preflight = req.method == "OPTIONS"
-        # Answer preflight directly so endpoints never deal with OPTIONS. A
-        # byte-vector body keeps this one of httphandler's three response types.
-        resp = preflight ? HTTP.Response(204, UInt8[]) : handler(req)
-        if origins === nothing
-            HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => "*")
-        else
-            # The response depends on Origin even when it is denied, so shared
-            # caches must not reuse it across origins.
-            vary = HTTP.header(resp.headers, "Vary", "")
-            HTTP.setheader(resp.headers, "Vary" => isempty(vary) ? "Origin" : vary * ", Origin")
-            origin = HTTP.header(req.headers, "Origin", "")
-            (isempty(origin) || !(origin in origins)) && return resp
-            HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => origin)
-            HTTP.setheader(resp.headers, "Access-Control-Allow-Credentials" => "true")
-        end
-        if preflight
-            requested = HTTP.header(req.headers, "Access-Control-Request-Headers", "")
-            HTTP.setheader(resp.headers, "Access-Control-Allow-Headers" =>
-                isempty(requested) ? CORS_ALLOW_HEADERS : requested)
-            HTTP.setheader(resp.headers, "Access-Control-Allow-Methods" => CORS_ALLOW_METHODS)
-        end
-        return resp
-    end
+cors_middleware(handler, origins::Union{Nothing, Vector{String}}=nothing) =
+    CORSHandler(handler, true, origins)
+
+# The middleware are callable structs with an `enabled` flag, so `serve!` builds
+# one concrete handler type whatever its `cors`/`accesslog` settings are.
+struct CORSHandler{H}
+    handler::H
+    enabled::Bool
+    origins::Union{Nothing, Vector{String}}
 end
 
-function accesslog_middleware(handler)
-    return function(req::HTTP.Request)
-        start = time()
-        resp = handler(req)
-        # The path only: query strings can carry tokens or personal data.
-        path, _ = splittarget(req.target)
-        @info "$(req.method) $path" status=resp.status duration_ms=round(Int, (time() - start) * 1000)
-        return resp
+function (h::CORSHandler)(req::HTTP.Request)
+    h.enabled || return h.handler(req)
+    preflight = req.method == "OPTIONS"
+    # Answer preflight directly so endpoints never deal with OPTIONS. A
+    # byte-vector body keeps this one of httphandler's three response types.
+    resp = preflight ? HTTP.Response(204, UInt8[]) : h.handler(req)
+    origins = h.origins
+    if origins === nothing
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => "*")
+    else
+        # The response depends on Origin even when it is denied, so shared
+        # caches must not reuse it across origins.
+        vary = HTTP.header(resp.headers, "Vary", "")
+        HTTP.setheader(resp.headers, "Vary" => isempty(vary) ? "Origin" : vary * ", Origin")
+        origin = HTTP.header(req.headers, "Origin", "")
+        (isempty(origin) || !(origin in origins)) && return resp
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Origin" => origin)
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Credentials" => "true")
     end
+    if preflight
+        requested = HTTP.header(req.headers, "Access-Control-Request-Headers", "")
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Headers" =>
+            isempty(requested) ? CORS_ALLOW_HEADERS : requested)
+        HTTP.setheader(resp.headers, "Access-Control-Allow-Methods" => CORS_ALLOW_METHODS)
+    end
+    return resp
+end
+
+accesslog_middleware(handler) = AccessLogHandler(handler, true)
+
+struct AccessLogHandler{H}
+    handler::H
+    enabled::Bool
+end
+
+function (h::AccessLogHandler)(req::HTTP.Request)
+    h.enabled || return h.handler(req)
+    start = time()
+    resp = h.handler(req)
+    # The path only: query strings can carry tokens or personal data.
+    path, _ = splittarget(req.target)
+    @info "$(req.method) $path" status=resp.status duration_ms=round(Int, (time() - start) * 1000)
+    return resp
 end
 
 """
@@ -364,23 +381,27 @@ the header your proxy sets (e.g. `"Fly-Client-IP"`); otherwise every client
 shares one public rate-limit bucket.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
-                middleware=identity, onerror=nothing, cors::Union{Bool, Vector{String}}=false,
-                accesslog::Bool=false, kw...)
-    handler = middleware(httphandler(router; onerror))
-    applicable(handler, HTTP.Request("GET", "/")) || throw(ArgumentError(
+                middleware::M=identity, onerror::E=nothing, cors::Union{Bool, Vector{String}}=false,
+                accesslog::Bool=false, kw...) where {M, E}
+    mounted = middleware(httphandler(router; onerror))
+    applicable(mounted, HTTP.Request("GET", "/")) || throw(ArgumentError(
         "middleware must return a handler callable with an HTTP.Request",
     ))
-    cors === false || (handler = cors_middleware(handler, cors === true ? nothing : cors))
-    accesslog && (handler = accesslog_middleware(handler))
+    handler = AccessLogHandler(
+        CORSHandler(mounted, cors !== false, cors isa Vector{String} ? cors : nothing),
+        accesslog,
+    )
 
     # Use HTTP.jl's stream server because it exposes the transport peer before
     # the request handler runs. The public `peeraddr` API works for HTTP/1 and
     # HTTP/2, including TLS connections.
     return HTTP.listen!(host, port; kw...) do stream
+        # Capture a String, not the optional peer address, so the request
+        # closure has one concrete type.
         peer = HTTP.peeraddr(stream)
+        peerip = peer === nothing ? "" : String(_peerip(peer))
         requesthandler = HTTP.streamhandler() do req
-            peer === nothing ||
-                (HTTP.get_request_context(req)[:peerip] = String(_peerip(peer)))
+            isempty(peerip) || (HTTP.get_request_context(req)[:peerip] = peerip)
             return handler(req)
         end
         return requesthandler(stream)

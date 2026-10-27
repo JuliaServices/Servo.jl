@@ -4,7 +4,8 @@
 # Router -> document: `OpenAPI.document(router)` describes a Servo.Router's
 # endpoints as OpenAPI, and `OpenAPI.register!(router)` additionally serves the
 # document from the running app at /openapi.json (making the endpoints
-# discoverable by clients and by OpenAPI.read).
+# discoverable by clients and by OpenAPI.read). `OpenAPI.register!(router, json)`
+# serves a document built ahead of time instead.
 #
 # Document -> router: `OpenAPI.server(doc; framework = :Servo)` generates a
 # server-stub module whose `register!(router, impl)` mounts typed handlers for
@@ -94,6 +95,27 @@ function OpenAPI.register!(router::Servo.Router; path::AbstractString="/openapi.
     return Servo.register!(router, Servo.Endpoint(;
         name="openapi", method=:GET, path, target,
         auth=Servo.Public(), format=Servo.TextFormat()))
+end
+
+"""
+    OpenAPI.register!(router::Servo.Router, json::AbstractString; path="/openapi.json")
+
+Serve a prebuilt OpenAPI JSON document at `path`. Build the document from the
+app's endpoint declarations ahead of time, for example as a module-level
+constant computed while the app package precompiles:
+
+    const OPENAPI_JSON = OpenAPI.JSON.json(
+        OpenAPI.document(register_endpoints!(Servo.Router()); title="My API", version="1.0.0"),
+    )
+
+Serving a constant involves no reflection, so this form also works in a
+`juliac --trim` build, where the per-request form cannot run.
+"""
+function OpenAPI.register!(router::Servo.Router, json::AbstractString; path::AbstractString="/openapi.json")
+    body = String(json)
+    return Servo.register!(router, :GET, path, function openapi(::Servo.HTTP.Request)
+        return Servo.Response(200, body; headers=["Content-Type" => "application/json"])
+    end; auth=Servo.Public())
 end
 
 # ── document -> router: server-stub emission ────────────────────────────────

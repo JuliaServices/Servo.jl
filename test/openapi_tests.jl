@@ -49,6 +49,23 @@ end
     finally
         close(server)
     end
+
+    # a prebuilt document is served verbatim
+    prebuilt = OpenAPI.JSON.json(document)
+    static_router = Servo.Router()
+    OpenAPI.register!(static_router, prebuilt; path = "/docs/openapi.json")
+    server = Servo.serve!(static_router; host = "127.0.0.1", port = 0)
+    try
+        response = HTTP.get(
+            "http://127.0.0.1:$(Servo.port(server))/docs/openapi.json";
+            status_exception = false,
+        )
+        @test response.status == 200
+        @test HTTP.header(response, "Content-Type") == "application/json"
+        @test String(response.body) == prebuilt
+    finally
+        close(server)
+    end
 end
 
 const SERVO_GEN_DOCUMENT = OpenAPI.obj(
