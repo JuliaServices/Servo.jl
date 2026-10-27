@@ -158,7 +158,7 @@ function httphandler(router::Router; onerror::E=nothing) where {E}
         try
             path, _ = splittarget(req.target)
             segments = String[percentdecode(s) for s in splitsegments(path)]
-            method = req.method == "HEAD" ? :GET : Symbol(req.method)
+            method = req.method == "HEAD" ? :GET : routemethod(req.method)
             m = matchroute(router, method, segments)
             m === nothing && throw(HTTPError(404, "no route for $(req.method) $path"))
             m === :method_not_allowed &&

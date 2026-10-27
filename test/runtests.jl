@@ -692,6 +692,19 @@ end
     end
 end
 
+@testset "request method names are not interned" begin
+    r = Servo.Router()
+    Servo.register!(r, "GET", "/x", (req::HTTP.Request) -> "ok"; auth=Servo.Public())
+    handler = Servo.httphandler(r)
+    interned(s) = ccall(:jl_symbol_lookup, Ptr{Cvoid}, (Cstring,), s) != C_NULL
+    method = "PROBE" * uppercase(string(rand(UInt128); base=36))
+    @test handler(HTTP.Request(method, "/x")).status == 405
+    @test handler(HTTP.Request(method, "/nope")).status == 404
+    @test Servo.matchroute(r, method, "/x") === :method_not_allowed
+    @test !interned(method)
+    @test handler(HTTP.Request("HEAD", "/x")).status == 200
+end
+
 # a scheme typed on HTTP.Request, as HTTP apps write them
 struct KeyHeaderAuth <: Servo.AuthScheme end
 Servo.authenticate(::KeyHeaderAuth, req::HTTP.Request) =

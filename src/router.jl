@@ -97,7 +97,7 @@ endpoint. So `/users/me` beats `/users/{id}`, `/a/{x}/c` beats `/{y}/b/c`, and
 any fixed-length pattern beats a catch-all where they overlap.
 """
 matchroute(r::Router, method::AbstractString, path::AbstractString) =
-    matchroute(r, Symbol(method), splitsegments(path))
+    matchroute(r, routemethod(method), splitsegments(path))
 
 function matchroute(r::Router, method::Symbol, segs::AbstractVector{<:AbstractString})
     # explicit lock/unlock: a `lock() do` closure would box the scan state below
