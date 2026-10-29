@@ -89,7 +89,7 @@ function handle(ep::Endpoint, pathparams::AbstractDict{Symbol, <:AbstractString}
         Vector{UInt8}(codeunits(String(raw)))
     ip = clientip(req)
     ipstr = ip === nothing ? "" : ip isa String ? ip : string(ip)
-    return ep.handler(pp, query, body, ipstr, req)
+    return ep.handler(ep, pp, query, body, ipstr, req)
 end
 
 """
@@ -107,7 +107,7 @@ end
 
 function (h::RequestHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    context = RequestContext(pr, call.req, call.pathparams, call.query)
+    context = RequestContext(pr, call.req, call.pathparams, call.query, call.endpoint)
     return @with REQUEST_CONTEXT => context begin
         toresponse(h.format, h.binder(h.format, call.pathparams, call.query, call.body))
     end
@@ -129,7 +129,7 @@ end
 
 function (h::RawHandler)(call::HandlerCall)
     pr = checkauth(h.name, h.auth, call)
-    context = RequestContext(pr, call.req, call.pathparams, call.query)
+    context = RequestContext(pr, call.req, call.pathparams, call.query, call.endpoint)
     return @with REQUEST_CONTEXT => context begin
         toresponse(h.format, withrequest(h.f.f, call.req, httponly(h.f.f)))
     end

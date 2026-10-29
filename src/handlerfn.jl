@@ -15,6 +15,7 @@
 # means "no body"; `clientip` empty means "unknown") so the handler call needs
 # no union-splitting, which the trim verifier cannot resolve
 mutable struct HandlerCall
+    endpoint::Any   # the matched `Endpoint`, which is defined after this file
     pathparams::Dict{Symbol, String}
     query::Dict{String, String}
     body::Vector{UInt8}
@@ -62,9 +63,9 @@ function HandlerFn(h::H) where {H}
     return HandlerFn(ptr, objptr, objref)
 end
 
-function (f::HandlerFn)(pathparams::Dict{Symbol, String}, query::Dict{String, String},
+function (f::HandlerFn)(endpoint, pathparams::Dict{Symbol, String}, query::Dict{String, String},
                         body::Vector{UInt8}, clientip::String, req)
-    call = HandlerCall(pathparams, query, body, clientip, req, nothing)
+    call = HandlerCall(endpoint, pathparams, query, body, clientip, req, nothing)
     GC.@preserve call begin
         ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, pointer_from_objref(call))
     end

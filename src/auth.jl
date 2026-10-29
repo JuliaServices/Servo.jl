@@ -97,9 +97,10 @@ struct RequestContext
     request::Any
     pathparams::Dict{Symbol, String}
     query::Dict{String, String}
+    endpoint::Any
 end
 
-const REQUEST_CONTEXT = ScopedValue(RequestContext(nothing, nothing, Dict{Symbol, String}(), Dict{String, String}()))
+const REQUEST_CONTEXT = ScopedValue(RequestContext(nothing, nothing, Dict{Symbol, String}(), Dict{String, String}(), nothing))
 
 """
     Servo.principal()
@@ -135,3 +136,12 @@ percent-decoded. Bound endpoints receive declared parameters as keyword
 arguments; this accessor is for raw handlers and for reading the whole query.
 """
 query() = REQUEST_CONTEXT[].query
+
+"""
+    Servo.endpoint() -> Union{Servo.Endpoint, Nothing}
+
+The endpoint the router matched for the current request, or `nothing` outside a
+handler call. Its `method` and `path` are the route as registered, such as `:GET`
+and `"/users/{id}"`, for logs or metrics grouped by route.
+"""
+endpoint() = REQUEST_CONTEXT[].endpoint::Union{Endpoint, Nothing}

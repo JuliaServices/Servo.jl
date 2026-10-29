@@ -129,6 +129,25 @@ function _matchroute(endpoints::Vector{Endpoint}, method::Symbol, segs::Abstract
     return pathmatched ? :method_not_allowed : nothing
 end
 
+# The methods with a route for `segs`, sorted, for a 405 response's `Allow`
+# header. Every pattern that matches the path counts, since routing would use any
+# of them, and `HEAD` is allowed wherever `GET` is because `HEAD` routes like `GET`.
+function allowedmethods(r::Router, segs::AbstractVector{<:AbstractString})
+    methods = String[]
+    lock(r.lock)
+    try
+        for ep in r.endpoints
+            matchsegments(ep.segments, segs) === nothing && continue
+            method = String(ep.method)
+            method in methods || push!(methods, method)
+        end
+    finally
+        unlock(r.lock)
+    end
+    "GET" in methods && !("HEAD" in methods) && push!(methods, "HEAD")
+    return sort!(methods)
+end
+
 function matchsegments(pattern::Vector{Segment}, segs::AbstractVector{<:AbstractString})
     n = length(pattern)
     if !isempty(pattern) && last(pattern).kind === :catchall

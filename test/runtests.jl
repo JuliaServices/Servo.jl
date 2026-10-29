@@ -494,6 +494,14 @@ end
     @test Servo.percentdecode("100%") == "100%"             # malformed escapes pass through
     @test Servo.percentdecode("%GG%1") == "%GG%1"
 
+    # the segments the router matches: query and empty segments dropped,
+    # each segment decoded exactly once, an encoded '/' kept inside its segment
+    @test Servo.pathsegments("/a/b?x=1") == ["a", "b"]
+    @test Servo.pathsegments("/%76%31//users/") == ["v1", "users"]
+    @test Servo.pathsegments("/files/a%2Fb") == ["files", "a/b"]
+    @test Servo.pathsegments("/x/%2541") == ["x", "%41"]
+    @test Servo.pathsegments("/?q=1") == String[]
+
     @test Servo.querypairs("") == Pair{String, String}[]
     @test Servo.querypairs("a=1&b=two") == ["a" => "1", "b" => "two"]
     @test Servo.querypairs("tag=a%20b&flag") == ["tag" => "a b", "flag" => ""]
@@ -690,6 +698,47 @@ end
     finally
         Servo.CLIENT_IP_HEADER[] = ""
     end
+end
+
+@testset "405 responses list the allowed methods" begin
+    r = Servo.Router()
+    Servo.register!(r, "GET", "/items/{id}", (req::HTTP.Request) -> "item"; auth=Servo.Public())
+    Servo.register!(r, "DELETE", "/items/{id}", (req::HTTP.Request) -> nothing; auth=Servo.Public())
+    Servo.register!(r, "POST", "/items/new", (req::HTTP.Request) -> "made"; auth=Servo.Public())
+    Servo.register!(r, "POST", "/forms", (req::HTTP.Request) -> "posted"; auth=Servo.Public())
+    handler = Servo.httphandler(r)
+
+    resp = handler(HTTP.Request("PUT", "/items/7"))
+    @test resp.status == 405
+    @test HTTP.header(resp, "Allow") == "DELETE, GET, HEAD"
+    # every pattern that matches the path counts, as routing would use it
+    @test HTTP.header(handler(HTTP.Request("PUT", "/items/new")), "Allow") == "DELETE, GET, HEAD, POST"
+    # HEAD routes like GET, so a path without GET refuses HEAD too
+    resp = handler(HTTP.Request("HEAD", "/forms"))
+    @test resp.status == 405
+    @test HTTP.header(resp, "Allow") == "POST"
+    # the header survives a custom onerror that keeps Servo's default response
+    quiet = Servo.httphandler(r; onerror=(e, ep, req) -> nothing)
+    @test HTTP.header(quiet(HTTP.Request("PATCH", "/forms")), "Allow") == "POST"
+end
+
+@testset "the matched endpoint is ambient" begin
+    r = Servo.Router()
+    Servo.register!(r, "GET", "/users/{id}", function (req)
+        ep = Servo.endpoint()
+        Servo.Response(200, "$(ep.method) $(ep.path)")
+    end; auth=Servo.Public())
+    m = Servo.matchroute(r, "GET", "/users/9")
+    resp = Servo.handle(m[1], m[2], TestRequest())
+    @test String(resp.body) == "GET /users/{id}"
+    @test Servo.endpoint() === nothing   # cleared outside the handler
+
+    # bound endpoints too, including tasks spawned inside the handler
+    who = Servo.@GET r "/who" public format=Servo.TextFormat() function who()
+        fetch(@async Servo.endpoint().name)
+    end
+    @test String(Servo.handle(who, NOPARAMS, TestRequest()).body) == "who"
+    @test Servo.endpoint() === nothing
 end
 
 @testset "request method names are not interned" begin
