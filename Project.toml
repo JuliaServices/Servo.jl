@@ -20,7 +20,7 @@ ServoOpenAPIExt = "OpenAPI"
 
 [compat]
 Figgy = "1.1.2"
-HTTP = "2"
+HTTP = "2.14.1"
 JSON = "1"
 Logging = "1"
 OpenAPI = "1"

@@ -367,18 +367,6 @@ access-log middleware wrap the result, so they also cover mounted paths.
 `cors` is `false` (no CORS headers), `true` (every origin, without credentials),
 or a `Vector{String}` of allowed origins (with credentials); see
 [`Servo.cors_middleware`](@ref).
-
-Statically compiled (juliac --trim) deployments should skip `serve!` and serve
-a composed handler through HTTP.jl's request-handler path directly — its
-runtime `cors`/`accesslog` flags make every middleware composition and the
-stream-server path statically reachable, and the stream path's body plumbing
-is not trim-verifiable:
-
-    HTTP.serve!(Servo.cors_middleware(Servo.httphandler(router)), host, port)
-
-That path never sees the transport peer, so set `Servo.CLIENT_IP_HEADER[]` to
-the header your proxy sets (e.g. `"Fly-Client-IP"`); otherwise every client
-shares one public rate-limit bucket.
 """
 function serve!(router::Router=ROUTER; host="0.0.0.0", port::Integer=8080,
                 middleware::M=identity, onerror::E=nothing, cors::Union{Bool, Vector{String}}=false,

@@ -405,7 +405,8 @@ Servo.run(...)   # run! + wait for SIGINT, then clean shutdown
 (`--trim=safe`, same harness as Figgy/JSON/StructUtils). The workload builds an
 app at runtime and exercises endpoint declaration + validation, routing, the
 type-erased handler path, statically-bound coercion, auth, rate limiting,
-TextFormat + JSON serialization, and Figgy config loading over a mock transport.
+TextFormat + JSON serialization, Figgy config loading, and a real server
+started with `run!`.
 
 The harness *attributes* verifier findings: **Servo-attributable findings must
 be zero on every supported Julia**, while findings matching known upstream gaps

@@ -68,7 +68,10 @@ function run!(name::AbstractString="Servo", profile::AbstractString="";
     CLIENT_IP_HEADER[] = config("client_ip_header", "")
     origins = config("cors_origins", nothing)
     cors = origins === nothing ? prof == "local" : _origins(origins)
-    server = serve!(router; host, port=p, middleware, onerror, cors, accesslog)
+    # Julia 1.13's trim verifier cannot resolve a keyword call whose value has a
+    # Union type, so each branch passes `cors` with one concrete type.
+    server = cors isa Bool ? serve!(router; host, port=p, middleware, onerror, cors, accesslog) :
+                             serve!(router; host, port=p, middleware, onerror, cors, accesslog)
     @info "$name listening" profile=prof host port=Servo.port(server) cors endpoints=length(router.endpoints)
     return server
 end
