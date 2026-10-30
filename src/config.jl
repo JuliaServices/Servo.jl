@@ -36,6 +36,29 @@ function config(key::AbstractString, default::String)
     return val
 end
 
+"""
+    Servo.config(key, default::Int) -> Int
+    Servo.config(key, default::Float64) -> Float64
+    Servo.config(key, default::Bool) -> Bool
+
+Typed lookups for numeric and boolean settings. A value of the default's type is
+returned as is, an `Int` is accepted for a `Float64` setting, and a string (as
+environment variables and `--key=value` program arguments provide) is parsed.
+Any other value throws `ArgumentError`. Like the `String` method, these keep
+configuration reads statically typed for juliac --trim consumers.
+"""
+function config(key::AbstractString, default::T) where {T<:Union{Int,Float64,Bool}}
+    val = config(key, nothing)
+    val === nothing && return default
+    val isa T && return val
+    T === Float64 && val isa Int && return Float64(val)
+    if val isa String
+        parsed = tryparse(T, T === Bool ? lowercase(strip(val)) : strip(val))
+        parsed === nothing || return parsed
+    end
+    throw(ArgumentError("config key \"$key\" holds a $(typeof(val)) that is not a valid $T"))
+end
+
 """current config profile ("local" unless configured otherwise)"""
 profile() = config("profile", "local")::String
 

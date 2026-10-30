@@ -1,8 +1,8 @@
 # JuliaC --trim=safe workload for Servo's core machinery: endpoint declaration
 # (macros + validation), routing, the type-erased handler path (HandlerFn),
 # statically-bound argument extraction/coercion, auth, public rate limiting,
-# formats (TextFormat + the JSON extension), the concrete HTTP transport, and
-# Figgy-backed config loading.
+# formats (TextFormat + the JSON extension), the concrete HTTP transport,
+# Figgy-backed config loading, and a server started with `run!`.
 #
 # The app is built at *runtime* (from main), the required pattern for endpoints:
 # their type-erased handlers capture function pointers that would go stale if
@@ -242,21 +242,22 @@ function _trim_http_transport(r::Servo.Router)::Nothing
     return nothing
 end
 
-# A real HTTP server around httphandler: the server's write path must stay
-# statically dispatched for every response type, streams included.
+# A real server started the way apps start one, through `run!` and `serve!`:
+# the server's write path must stay statically dispatched for every response
+# type, streams included.
 function _trim_http_server(r::Servo.Router)::Nothing
-    server = HTTP.serve!(Servo.httphandler(r), "127.0.0.1", 0; listenany=true)
+    server = Servo.run!("ServoTrim"; router = r, host = "127.0.0.1", port = 0, log = false)
     try
-        base = "http://127.0.0.1:$(HTTP.port(server))"
+        base = "http://127.0.0.1:$(Servo.port(server))"
         response = HTTP.get(base * "/stream"; status_exception=false)
         _trim_assert(response.status == 200, "served stream status")
         _trim_assert(String(response.body) == "data: tick\n\ndata: tick\n\n", "served stream body")
         response = HTTP.get(base * "/pub"; status_exception=false)
         _trim_assert(String(response.body) == "ok", "served buffered body")
+        response = HTTP.get(base * "/status"; status_exception=false)
+        _trim_assert(String(response.body) == "ok", "served builtin status")
     finally
-        # forceclose: graceful `close` reaches HTTP.jl's Function-typed HTTP/2
-        # shutdown hook, which is not trim-verifiable (an HTTP.jl gap)
-        HTTP.forceclose(server)
+        close(server)
     end
     return nothing
 end

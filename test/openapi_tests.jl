@@ -17,11 +17,16 @@ Servo.@POST DOC_ROUTER "/widgets" public format=Servo.JSONFormat() function open
     return w
 end
 
+# Always throws here, so inference finds no return type; the declared one is used.
+Servo.@PUT DOC_ROUTER "/widgets/{id}" public function openapi_replacewidget(id::Int, w::DocWidget)::DocWidget
+    throw(Servo.HTTPError(503, "replacing widgets is switched off"))
+end
+
 @testset "OpenAPI document generation from a Servo router" begin
     operations = OpenAPI.operations(DOC_ROUTER)
-    @test length(operations) == 2
+    @test length(operations) == 3
     @test Set(op.id for op in operations) ==
-          Set(["openapi_getwidget", "openapi_addwidget"])
+          Set(["openapi_getwidget", "openapi_addwidget", "openapi_replacewidget"])
 
     document = OpenAPI.document(DOC_ROUTER; title = "Doc", version = "1.2.3")
     @test document["info"]["title"] == "Doc"
@@ -32,6 +37,8 @@ end
     @test ("id", "path") in names
     @test ("verbose", "query") in names
     @test haskey(document["components"]["schemas"], "DocWidget")
+    replaced = document["paths"]["/widgets/{id}"]["put"]["responses"]["200"]
+    @test replaced["content"]["application/json"]["schema"]["\$ref"] == "#/components/schemas/DocWidget"
 
     OpenAPI.register!(DOC_ROUTER; title = "Doc", version = "1.2.3")
     server = Servo.serve!(DOC_ROUTER; host = "127.0.0.1", port = 0)
@@ -46,6 +53,23 @@ end
         @test haskey(served["paths"], "/widgets/{id}")
         # the discovery endpoint documents the live route table but not itself
         @test !haskey(served["paths"], "/openapi.json")
+    finally
+        close(server)
+    end
+
+    # a prebuilt document is served verbatim
+    prebuilt = OpenAPI.JSON.json(document)
+    static_router = Servo.Router()
+    OpenAPI.register!(static_router, prebuilt; path = "/docs/openapi.json")
+    server = Servo.serve!(static_router; host = "127.0.0.1", port = 0)
+    try
+        response = HTTP.get(
+            "http://127.0.0.1:$(Servo.port(server))/docs/openapi.json";
+            status_exception = false,
+        )
+        @test response.status == 200
+        @test HTTP.header(response, "Content-Type") == "application/json"
+        @test String(response.body) == prebuilt
     finally
         close(server)
     end

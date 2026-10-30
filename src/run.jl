@@ -18,11 +18,6 @@ macro init(expr)
     end)
 end
 
-_int(x::Integer) = Int(x)
-_int(x) = parse(Int, string(x))
-_float(x::Real) = Float64(x)
-_float(x) = parse(Float64, string(x))
-
 """
     Servo.run!(name="Servo", profile=""; kw...) -> server
 
@@ -57,29 +52,39 @@ tables. If it throws, `run!` stops without starting the server.
 function run!(name::AbstractString="Servo", profile::AbstractString="";
               router::Router=ROUTER, host="0.0.0.0", port::Union{Integer, Nothing}=nothing,
               configdir::Union{AbstractString, Nothing}=nothing, configs=Dict{String, Any}(),
-              setup=Returns(nothing), middleware=identity, onerror=nothing,
-              builtins::Bool=true, accesslog::Bool=true, log::Bool=!isinteractive())
+              setup::S=Returns(nothing), middleware::M=identity, onerror::E=nothing,
+              builtins::Bool=true, accesslog::Bool=true, log::Bool=!isinteractive()) where {S, M, E}
     @info "$name init" julia=Base.VERSION threads=Threads.nthreads()
     prof = loadconfig!(; profile, configdir, configs, log)
     # Configuration must be ready before application provisioning runs. The
     # listener starts later, so a provisioning error cannot expose a partly
     # initialized service.
     setup()
-    p = _int(something(port, config("port", 8080)))
+    p = port === nothing ? config("port", 8080) : Int(port)
     PUBLIC_RATE_LIMITER[] = RateLimiter(;
-        rps=_float(config("public_ratelimit_rps", 5.0)),
-        burst=_float(config("public_ratelimit_burst", 20.0)))
+        rps=config("public_ratelimit_rps", 5.0),
+        burst=config("public_ratelimit_burst", 20.0))
     builtins && registerbuiltins!(router)
     CLIENT_IP_HEADER[] = config("client_ip_header", "")
     origins = config("cors_origins", nothing)
     cors = origins === nothing ? prof == "local" : _origins(origins)
-    server = serve!(router; host, port=p, middleware, onerror, cors, accesslog)
+    # Julia 1.13's trim verifier cannot resolve a keyword call whose value has a
+    # Union type, so each branch passes `cors` with one concrete type.
+    server = cors isa Bool ? serve!(router; host, port=p, middleware, onerror, cors, accesslog) :
+                             serve!(router; host, port=p, middleware, onerror, cors, accesslog)
     @info "$name listening" profile=prof host port=Servo.port(server) cors endpoints=length(router.endpoints)
     return server
 end
 
-_origins(x::AbstractString) = String[strip(o) for o in split(x, ',') if !isempty(strip(o))]
-_origins(x::AbstractVector) = String[String(o) for o in x]
+# `cors_origins` is a TOML list of strings or a comma-separated string (from an
+# environment variable or program argument). One method keeps the call on the
+# untyped config value statically resolvable.
+function _origins(@nospecialize(x))
+    x isa String && return String[strip(o) for o in split(x, ',') if !isempty(strip(o))]
+    x isa Vector{String} && return x
+    x isa Vector{Any} && return String[o::String for o in x]
+    throw(ArgumentError("config key \"cors_origins\" must be a list of strings or a comma-separated string"))
+end
 
 """
     Servo.run(name="Servo", profile=""; kw...)

@@ -1053,6 +1053,30 @@ end
     end
 end
 
+@testset "typed config lookups" begin
+    empty!(Servo.CONFIG)
+    Servo.loadconfig!(; configs=Dict{String,Any}(
+        "port" => "9001", "workers" => 4, "ratio" => 2, "rate" => " 1.5 ",
+        "flag" => "TRUE", "off" => false, "bad" => "nope", "list" => ["a"],
+    ), log=false)
+    @test Servo.config("port", 8080) === 9001
+    @test Servo.config("workers", 1) === 4
+    @test Servo.config("missing", 7) === 7
+    @test Servo.config("ratio", 1.0) === 2.0
+    @test Servo.config("rate", 1.0) === 1.5
+    @test Servo.config("flag", false) === true
+    @test Servo.config("off", true) === false
+    @test_throws ArgumentError Servo.config("bad", 1)
+    @test_throws ArgumentError Servo.config("bad", false)
+    @test_throws ArgumentError Servo.config("list", 1.0)
+    @test Servo._origins(" https://a.example, https://b.example ") ==
+          ["https://a.example", "https://b.example"]
+    @test Servo._origins(["https://a.example"]) == ["https://a.example"]
+    @test Servo._origins(Any["https://a.example"]) == ["https://a.example"]
+    @test_throws ArgumentError Servo._origins(1)
+    empty!(Servo.CONFIG)
+end
+
 end # @testset "Servo"
 
 # OpenAPI 1 requires Julia 1.11. CI disables only this optional extension on 1.10.
