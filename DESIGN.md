@@ -181,7 +181,9 @@ Servo.register!(router, :GET, "/files/**", req -> Servo.Response(200, ...);
 
 The handler gets the raw transport request and returns a `Servo.Response` (or
 `nothing`/a value, serialized with the route's `format`); captures are available
-via `Servo.pathparams()`, the whole query via `Servo.query()`. No binding, no
+via `Servo.pathparams()`, the whole query via `Servo.query()`, and the matched
+endpoint via `Servo.endpoint()` (its `method` and `path` name the route as
+registered). No binding, no
 format negotiation — but **auth is not an escape hatch**: raw routes declare
 `auth` like every other endpoint, public ones get the default rate limiting
 (`Servo.Public(ratelimit=false)` opts a route out, e.g. for internal callers
@@ -195,6 +197,12 @@ one concrete body type that calls the wrapped body's `body_read!`/`body_close!`/
 `HandlerFn` trick again). So `httphandler` returns a closed set of response
 types and the server's write path stays statically dispatched under juliac
 --trim, streams included.
+
+Routing matches a request by `Servo.pathsegments(req.target)`: the query and
+empty segments are dropped and each segment is percent-decoded once. Middleware
+that classifies requests by path before the router runs (rate limits, access
+logs) should use the same function, so it reads every path the way routing does.
+A 405 lists the methods the path has routes for in `Allow`.
 
 `HEAD` requests are routed like `GET`, and HTTP.jl sends no body. A streaming
 body is closed before Servo returns it, since HTTP.jl's stream server would

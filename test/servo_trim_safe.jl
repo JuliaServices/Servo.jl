@@ -141,6 +141,10 @@ function _buildapp()
     Servo.register!(r, :GET, "/stream", function stream(req::HTTP.Request)
         HTTP.Response(200, TickBody(2, false); headers=["Content-Type" => "text/event-stream"])
     end; auth=Servo.Public())
+    Servo.register!(r, :GET, "/routeof/{id}", function routeof(req::HTTP.Request)
+        ep = Servo.endpoint()::Servo.Endpoint
+        Servo.Response(200, ep.path)
+    end; auth=Servo.Public())
     Servo.register!(r, :GET, "/challenge", function challenge(req::HTTP.Request)
         throw(Servo.HTTPError(401, "no"; headers=["WWW-Authenticate" => "Bearer"], body="{}"))
     end; auth=Servo.Public(ratelimit=false))
@@ -161,7 +165,8 @@ function _trim_routing(r::Servo.Router)::Nothing
     _trim_assert(pp[:id] == "42", "path param captured")
     _trim_assert(Servo.matchroute(r, "PUT", "/items/42") === :method_not_allowed, "405")
     _trim_assert(Servo.matchroute(r, "GET", "/nope") === nothing, "404")
-    _trim_assert(length(r.endpoints) == 16, "route table size")
+    _trim_assert(length(r.endpoints) == 17, "route table size")
+    _trim_assert(Servo.pathsegments("/%76%31//items/a%2Fb?x=1") == ["v1", "items", "a/b"], "path segments")
 
     # catch-all: binds the slash-joined remainder, needs at least one segment
     ep, pp = _getep(r, "GET", "/docs/guide/intro")
@@ -227,6 +232,12 @@ function _trim_http_transport(r::Servo.Router)::Nothing
     _trim_assert(!HTTP.body_closed(response.body), "stream open")
     HTTP.body_close!(response.body)
     _trim_assert(HTTP.body_closed(response.body), "stream closed")
+
+    response = handler(HTTP.Request("PUT", "/http-native"))
+    _trim_assert(response.status == 405, "HTTP transport 405 status")
+    _trim_assert(HTTP.header(response, "Allow") == "GET, HEAD", "405 lists the allowed methods")
+    response = handler(HTTP.Request("GET", "/routeof/3"))
+    _trim_assert(String(response.body) == "/routeof/{id}", "matched endpoint is ambient")
 
     response = handler(HTTP.Request("GET", "/challenge"))
     _trim_assert(response.status == 401 && HTTP.header(response, "WWW-Authenticate") == "Bearer",

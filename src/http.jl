@@ -46,6 +46,19 @@ function percentdecode(s::AbstractString; plus::Bool=false)
     return String(take!(out))
 end
 
+"""
+    Servo.pathsegments(target) -> Vector{String}
+
+The path segments the router matches for a request `target`. The query and empty
+segments are dropped and each segment is percent-decoded once, so
+`"/%76%31//users?x=1"` gives `["v1", "users"]`, and a `/` decoded inside a segment
+stays in that segment. Middleware that treats requests differently by path before
+the router runs, such as a rate limit or an access log, can classify requests by
+these segments to agree with routing.
+"""
+pathsegments(target::AbstractString) =
+    String[percentdecode(s) for s in splitsegments(first(splittarget(target)))]
+
 """decode a raw query string into ordered key => value pairs"""
 function querypairs(query::AbstractString)
     pairs = Pair{String, String}[]
@@ -134,8 +147,10 @@ end
     Servo.httphandler(router; onerror=nothing) -> f(::HTTP.Request)::HTTP.Response
 
 The HTTP request handler for a router: match, `Servo.handle`, and translate
-results/errors into HTTP responses. `HEAD` requests are routed like `GET`
-(HTTP.jl sends no body; a streaming body is closed before it is returned).
+results/errors into HTTP responses. Requests are matched by their
+[`Servo.pathsegments`](@ref). `HEAD` requests are routed like `GET`
+(HTTP.jl sends no body; a streaming body is closed before it is returned). A 405
+response lists the methods the path has routes for in `Allow`.
 Errors are serialized into a stable `(; error = (; message, code))` envelope
 with the endpoint's format (plain text when no endpoint was matched).
 
@@ -157,12 +172,12 @@ function httphandler(router::Router; onerror::E=nothing) where {E}
         ep = nothing
         try
             path, _ = splittarget(req.target)
-            segments = String[percentdecode(s) for s in splitsegments(path)]
+            segments = pathsegments(req.target)
             method = req.method == "HEAD" ? :GET : routemethod(req.method)
             m = matchroute(router, method, segments)
             m === nothing && throw(HTTPError(404, "no route for $(req.method) $path"))
-            m === :method_not_allowed &&
-                throw(HTTPError(405, "$(req.method) not allowed for $path"))
+            m === :method_not_allowed && throw(HTTPError(405, "$(req.method) not allowed for $path";
+                headers=["Allow" => join(allowedmethods(router, segments), ", ")]))
             ep, pathparams = m
             resp = handle(ep, pathparams, req)
             resp isa NativeResponse || return httpresponse(resp)
